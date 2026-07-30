@@ -1,17 +1,23 @@
 import { describe, expect, it } from "vitest"
 
-import { formatSessionLabel } from "./session-label.js"
+import { sessionDisplayTitle } from "./session-label.js"
 
-describe("formatSessionLabel", () => {
-  it("uses the unique suffix of local timestamp-based session ids", () => {
-    expect(formatSessionLabel("session_1785274367000_a1b2c3d4")).toBe("a1b2c3d4")
+describe("sessionDisplayTitle", () => {
+  it("uses a human title when one is available", () => {
+    expect(
+      sessionDisplayTitle({
+        id: "session_1785274367000_a1b2c3d4",
+        title: "Investigate parser",
+      }),
+    ).toBe("Investigate parser")
   })
 
-  it("keeps short opaque remote ids readable", () => {
-    expect(formatSessionLabel("run-42")).toBe("run-42")
-  })
-
-  it("uses the final characters for long opaque ids", () => {
-    expect(formatSessionLabel("remote-session-1234567890abcdef")).toBe("90abcdef")
+  it("never exposes the opaque id when a session has no title", () => {
+    expect(
+      sessionDisplayTitle({
+        id: "remote-session-1234567890abcdef",
+        title: "  ",
+      }),
+    ).toBe("Untitled session")
   })
 })

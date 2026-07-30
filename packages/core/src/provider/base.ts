@@ -1,4 +1,4 @@
-import { streamText, type LanguageModelV1 } from "ai"
+import { streamText, type CoreMessage, type LanguageModelV1 } from "ai"
 import type { z } from "zod"
 import type {
   LLMClient,
@@ -105,7 +105,7 @@ export class BaseLLMClient implements LLMClient {
 
   private async *_streamOnce(
     opts: StreamOptions,
-    messages: Parameters<typeof streamText>[0]["messages"],
+    messages: CoreMessage[],
     tools: Record<string, { description: string; parameters: z.ZodType<unknown> }> | undefined,
     providerOptions: Record<string, unknown> | undefined
   ): AsyncIterable<LLMStreamEvent> {
@@ -1004,8 +1004,8 @@ function buildAISDKMessages(
   providerName: string,
   modelId: string,
   reasoningHistoryMode: ReasoningHistoryMode,
-): Parameters<typeof streamText>[0]["messages"] {
-  const result: Parameters<typeof streamText>[0]["messages"] = []
+): CoreMessage[] {
+  const result: CoreMessage[] = []
 
   for (const msg of messages) {
     if (msg.role === "system") continue // handled via system param
@@ -1018,19 +1018,25 @@ function buildAISDKMessages(
 
     if (!Array.isArray(msg.content) || msg.content.length === 0) continue
 
-    // Tool result messages (role === "tool") are converted to plain user text.
-    // This keeps compatibility with AI SDK message typings that do not accept role "tool".
+    // Preserve the native tool role and call identity. AI SDK 4 accepts
+    // CoreToolMessage directly; flattening this into user text breaks the
+    // assistant tool-call/result pairing on OpenAI-compatible gateways and can
+    // make models retry a tool they already completed.
     if (msg.role === "tool") {
-      const toolResultLines = msg.content
+      const toolResults = msg.content
         .filter(p => p.type === "tool-result")
         .map(p => {
           const tr = p as { type: "tool-result"; toolCallId: string; toolName: string; result: string; isError?: boolean }
-          const toolName = tr.toolName ?? "unknown_tool"
-          const prefix = tr.isError ? "TOOL_ERROR" : "TOOL_RESULT"
-          return `${prefix} ${toolName} (${tr.toolCallId}): ${tr.result}`
+          return {
+            type: "tool-result" as const,
+            toolCallId: tr.toolCallId,
+            toolName: tr.toolName ?? "unknown_tool",
+            result: tr.result,
+            isError: tr.isError ?? false,
+          }
         })
-      if (toolResultLines.length > 0) {
-        result.push({ role: "user", content: toolResultLines.join("\n") })
+      if (toolResults.length > 0) {
+        result.push({ role: "tool", content: toolResults })
       }
       continue
     }

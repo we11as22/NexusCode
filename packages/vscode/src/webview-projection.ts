@@ -72,6 +72,21 @@ export function projectSessionMessagesForWebview(
   })
 }
 
+/**
+ * Bound the transcript carried by frequent webview state snapshots while the
+ * durable session and model context retain their complete history.
+ */
+export function windowSessionMessagesForWebview(
+  messages: readonly SessionMessage[],
+  limit: number,
+): SessionMessage[] {
+  const safeLimit =
+    Number.isSafeInteger(limit) && limit > 0
+      ? limit
+      : 1
+  return messages.slice(Math.max(0, messages.length - safeLimit))
+}
+
 export function projectAgentEventForWebview(event: AgentEvent): AgentEvent {
   if (event.type !== "tool_end") return event
   const raw = event as AgentEvent & Record<string, unknown>

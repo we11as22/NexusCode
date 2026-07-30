@@ -12,7 +12,7 @@ export function resolveChangeReviewSelection(
 ): CliChangeReviewItem {
   const trimmed = selector.trim()
   if (!trimmed) {
-    throw new Error("Specify the change number or change-set id shown by /changes.")
+    throw new Error("Specify the change number shown by /changes.")
   }
   if (/^[1-9][0-9]*$/u.test(trimmed)) {
     const index = Number(trimmed) - 1
@@ -41,15 +41,22 @@ export function formatChangeReview(
   }
   const rows = items.map((item, index) => {
     const paths = item.paths.join(", ")
-    return (
-      `${index + 1}. ${item.changeSetId.slice(0, 12)} ` +
-      `(+${item.added} -${item.removed}) ${paths}`
-    )
+    return `${index + 1}. (+${item.added} -${item.removed}) ${paths}`
   })
   return [
     "Applied Nexus changes awaiting review:",
     ...rows,
     truncated ? "The server response was truncated; review remaining changes after resolving these." : "",
-    "Use /accept <number|id> to keep one change or /revert <number|id> to restore its exact prior bytes.",
+    "Use /accept <number> to keep one change or /revert <number> to restore its exact prior bytes.",
   ].filter(Boolean).join("\n")
+}
+
+export function formatChangeResolution(
+  item: CliChangeReviewItem,
+  action: "accept" | "revert",
+): string {
+  const paths = item.paths.join(", ") || "the selected files"
+  return action === "accept"
+    ? `Accepted change: ${paths}.`
+    : `Reverted change and restored the exact prior file state: ${paths}.`
 }

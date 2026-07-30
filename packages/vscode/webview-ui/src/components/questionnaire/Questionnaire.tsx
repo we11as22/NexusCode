@@ -16,6 +16,7 @@ import {
   type QuestionnaireDraft,
   type QuestionnaireRequest,
 } from "./model"
+import { questionnaireKeyboardAction } from "./keyboard-policy"
 
 interface QuestionnaireProps {
   request: QuestionnaireRequest
@@ -117,7 +118,69 @@ export function Questionnaire({
         onDismiss()
         return
       }
-      if (draft.phase !== "answering") return
+      const target = event.target
+      const targetElement = target instanceof HTMLElement ? target : null
+      if (draft.phase === "review") {
+        const reviewAction = questionnaireKeyboardAction({
+          key: event.key,
+          targetTag: targetElement?.tagName,
+          targetEditable: targetElement?.isContentEditable,
+          activeAnswered: allAnswered,
+          ctrlKey: event.ctrlKey,
+          metaKey: event.metaKey,
+        })
+        if (reviewAction === "continue") {
+          event.preventDefault()
+          submit()
+        }
+        return
+      }
+      const optionCount =
+        (question?.options.length ?? 0) +
+        (question?.allowCustom === true ? 1 : 0)
+      const action = questionnaireKeyboardAction({
+        key: event.key,
+        targetTag: targetElement?.tagName,
+        targetEditable: targetElement?.isContentEditable,
+        activeAnswered,
+        optionCount,
+        ctrlKey: event.ctrlKey,
+        metaKey: event.metaKey,
+      })
+      if (action === "continue") {
+        event.preventDefault()
+        continueFlow()
+        return
+      }
+      if (typeof action === "object" && question) {
+        event.preventDefault()
+        const option = question.options[action.selectOption]
+        if (option) {
+          setFocusedOptionId(option.id)
+          setDraft((current) =>
+            selectQuestionOption(
+              request,
+              current,
+              question.id,
+              option.id,
+            ),
+          )
+        } else if (
+          question.allowCustom === true &&
+          action.selectOption === question.options.length
+        ) {
+          setFocusedOptionId(null)
+          setDraft((current) =>
+            setCustomQuestionAnswer(
+              request,
+              current,
+              question.id,
+              current.answers[question.id]?.customText ?? "",
+            ),
+          )
+        }
+        return
+      }
       if (event.key === "ArrowLeft") {
         event.preventDefault()
         setDraft((current) => moveQuestion(request, current, -1))
@@ -128,7 +191,16 @@ export function Questionnaire({
     }
     window.addEventListener("keydown", onKeyDown, true)
     return () => window.removeEventListener("keydown", onKeyDown, true)
-  }, [activeAnswered, draft.phase, onDismiss, request])
+  }, [
+    activeAnswered,
+    allAnswered,
+    continueFlow,
+    draft.phase,
+    onDismiss,
+    question,
+    request,
+    submit,
+  ])
 
   if (!question && draft.phase !== "review") return null
 
@@ -381,6 +453,7 @@ export function Questionnaire({
               : draft.activeIndex === request.questions.length - 1
                 ? "Review"
                 : "Continue"}
+            <kbd className="nexus-kbd">↵</kbd>
           </button>
         </div>
       </footer>

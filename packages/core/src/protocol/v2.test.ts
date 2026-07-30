@@ -109,7 +109,11 @@ describe("protocol v2", () => {
       inputId: "input-1",
       mode: "agent",
       input: [
-        { type: "text", text: "inspect this" },
+        {
+          type: "text",
+          text: "inspect this with private injected context",
+          user_message: "Inspect this",
+        },
         { type: "image", mimeType: "image/png", data: "aGVsbG8=" },
         { type: "mention", name: "config", path: "src/config.ts" },
         { type: "skill", name: "review" },
@@ -137,6 +141,11 @@ describe("protocol v2", () => {
       "mention",
       "skill",
     ])
+    expect(command.input[0]).toEqual({
+      type: "text",
+      text: "inspect this with private injected context",
+      user_message: "Inspect this",
+    })
     expect(JSON.parse(JSON.stringify(command))).toEqual(command)
     expect("apiKey" in command).toBe(false)
   })

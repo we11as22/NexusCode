@@ -131,7 +131,11 @@ function capturedMatchesRef(
   return (
     actual.hash === expected.hash &&
     actual.byteLength === expected.byteLength &&
-    captured.mode === expected.mode
+    (
+      captured.mode === null ||
+      expected.mode === null ||
+      captured.mode === expected.mode
+    )
   )
 }
 

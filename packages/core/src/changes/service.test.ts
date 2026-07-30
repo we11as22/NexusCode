@@ -116,13 +116,17 @@ class MemoryFilePort implements ChangeSetFilePort {
   readonly files = new Map<string, CapturedFileState>()
   beforeApply?: (mutation: HostFileMutation) => void | Promise<void>
   afterApply?: (mutation: HostFileMutation) => void | Promise<void>
+  hideModes = false
 
   set(filePath: string, state: CapturedFileState): void {
     this.files.set(filePath, cloneCaptured(state))
   }
 
   async readFileState(filePath: string): Promise<CapturedFileState> {
-    return cloneCaptured(this.files.get(filePath) ?? absent())
+    const captured = cloneCaptured(this.files.get(filePath) ?? absent())
+    return captured.exists && this.hideModes
+      ? { ...captured, mode: null }
+      : captured
   }
 
   async applyFileMutation(mutation: HostFileMutation): Promise<void> {
@@ -769,6 +773,32 @@ describe("ChangeSetService", () => {
 
     await service.revert(edited.id)
     await expect(port.readFileState("created.ts")).resolves.toEqual(absent())
+  })
+
+  it("reverts an exact created file when the host cannot report POSIX mode", async () => {
+    const { service, port } = harness({})
+    const proposed = await service.propose({
+      identity: identity("write-mode-unknown"),
+      files: [{
+        path: "created.txt",
+        after: { exists: true, content: "PLAN_OK" },
+        hunks: [],
+        binary: false,
+      }],
+    })
+    await service.approve(proposed.id, proposed.proposalHash)
+    await service.apply(proposed.id)
+
+    port.hideModes = true
+    await expect(port.readFileState("created.txt")).resolves.toMatchObject({
+      exists: true,
+      content: Buffer.from("PLAN_OK"),
+      mode: null,
+    })
+    await expect(service.revert(proposed.id)).resolves.toMatchObject({
+      state: "reverted",
+    })
+    await expect(port.readFileState("created.txt")).resolves.toEqual(absent())
   })
 
   it("refuses undo after a later manual edit and retains a durable conflict", async () => {

@@ -89,7 +89,7 @@ export interface TurnExecutionSnapshot {
 }
 
 export type SessionInputPart =
-  | { type: "text"; text: string }
+  | { type: "text"; text: string; user_message?: string }
   | { type: "image"; mimeType: string; data: string }
   | { type: "mention"; name: string; path: string }
   | { type: "skill"; name: string }

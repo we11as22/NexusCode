@@ -5,7 +5,7 @@
  * Replaces the legacy SQLite session store so server, CLI, and VS Code share one source of truth.
  */
 
-import type { Mode, SessionMessage } from "@nexuscode/core"
+import type { Mode, NonPlanMode, SessionMessage } from "@nexuscode/core"
 import {
   canonicalProjectRoot,
   listSessions as coreListSessions,
@@ -16,6 +16,7 @@ import {
   getSessionMeta,
   generateSessionId,
   SessionConflictError,
+  transitionSessionMode,
   type StoredSession,
 } from "@nexuscode/core"
 
@@ -25,6 +26,8 @@ export interface SessionMeta {
   ts: number
   title?: string
   mode?: Mode
+  planReturnMode?: NonPlanMode
+  todo?: string
   messageCount: number
   revision: number
 }
@@ -56,6 +59,8 @@ export async function ensureSessionOnDisk(sessionId: string, cwd: string): Promi
       ts: existing.ts,
       title: existing.title,
       mode: existing.mode,
+      planReturnMode: existing.planReturnMode,
+      todo: existing.todo,
       messageCount: existing.messageCount,
       revision: existing.revision,
     }
@@ -81,6 +86,8 @@ export async function ensureSessionOnDisk(sessionId: string, cwd: string): Promi
       ts: raced.ts,
       title: raced.title,
       mode: raced.mode,
+      planReturnMode: raced.planReturnMode,
+      todo: raced.todo,
       messageCount: raced.messageCount,
       revision: raced.revision,
     }
@@ -102,6 +109,8 @@ export async function getSession(sessionId: string, cwd: string): Promise<Sessio
     ts: meta.ts,
     title: meta.title,
     mode: meta.mode,
+    planReturnMode: meta.planReturnMode,
+    todo: meta.todo,
     messageCount: meta.messageCount,
     revision: meta.revision,
   }
@@ -124,13 +133,22 @@ export async function updateSessionMode(
   sessionId: string,
   cwd: string,
   mode: Mode,
+  todo?: string,
 ): Promise<void> {
   const root = canonicalProjectRoot(cwd)
-  const updated = await mutateSession(sessionId, root, (stored) => ({
-    ...stored,
-    mode,
-    ts: Date.now(),
-  }))
+  const updated = await mutateSession(sessionId, root, (stored) => {
+    const transition = transitionSessionMode(
+      stored.mode,
+      stored.planReturnMode,
+      mode,
+    )
+    return {
+      ...stored,
+      ...transition,
+      ...(todo !== undefined ? { todo } : {}),
+      ts: Date.now(),
+    }
+  })
   if (!updated) throw new Error(`Session not found: ${sessionId}`)
 }
 
@@ -166,14 +184,27 @@ export async function appendMessages(
   const updated = await mutateSession(sessionId, root, (stored) => {
     const existingIds = new Set(stored.messages.map((message) => message.id))
     const additions = messages.filter((message) => !existingIds.has(message.id))
+    const admittedMode =
+      [...additions]
+        .reverse()
+        .find((message) => message.role === "user" && message.mode)
+        ?.mode
+    const transition = admittedMode
+      ? transitionSessionMode(
+          stored.mode,
+          stored.planReturnMode,
+          admittedMode,
+        )
+      : {
+          ...(stored.mode ? { mode: stored.mode } : {}),
+          ...(stored.planReturnMode
+            ? { planReturnMode: stored.planReturnMode }
+            : {}),
+        }
     return {
       ...stored,
       messages: additions.length > 0 ? [...stored.messages, ...additions] : stored.messages,
-      mode:
-        [...additions]
-          .reverse()
-          .find((message) => message.role === "user" && message.mode)
-          ?.mode ?? stored.mode,
+      ...transition,
       ts: additions.length > 0 ? Date.now() : stored.ts,
     }
   })

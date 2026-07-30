@@ -57,16 +57,22 @@ describe("SessionStore journal v2", () => {
     const store = new SessionStore({ homeDir: root })
 
     await store.saveSession(
-      { ...stored("session_mode", cwd), mode: "plan" },
+      {
+        ...stored("session_mode", cwd),
+        mode: "plan",
+        planReturnMode: "debug",
+      },
       { expectedRevision: 0 },
     )
 
     await expect(store.loadSession("session_mode", cwd)).resolves.toMatchObject({
       mode: "plan",
+      planReturnMode: "debug",
       messages: [],
     })
     await expect(store.getSessionMeta("session_mode", cwd)).resolves.toMatchObject({
       mode: "plan",
+      planReturnMode: "debug",
     })
   })
 
@@ -196,6 +202,31 @@ describe("SessionStore journal v2", () => {
       store.saveSession(
         { ...writerB!, messages: [...writerB!.messages, message("from-b")] },
         { expectedRevision: writerB!.revision },
+      ),
+    ).rejects.toBeInstanceOf(SessionConflictError)
+  })
+
+  it("guards metadata mutations with the caller revision", async () => {
+    const { root, cwd } = await fixture()
+    const store = new SessionStore({ homeDir: root })
+    await store.saveSession(stored("session_metadata_conflict", cwd), {
+      expectedRevision: 0,
+    })
+    const stale = await store.loadSession("session_metadata_conflict", cwd)
+
+    await store.mutateSession(
+      "session_metadata_conflict",
+      cwd,
+      (current) => ({ ...current, mode: "plan" }),
+      { expectedRevision: stale!.revision },
+    )
+
+    await expect(
+      store.mutateSession(
+        "session_metadata_conflict",
+        cwd,
+        (current) => ({ ...current, mode: "agent" }),
+        { expectedRevision: stale!.revision },
       ),
     ).rejects.toBeInstanceOf(SessionConflictError)
   })

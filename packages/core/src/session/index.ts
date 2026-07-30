@@ -18,6 +18,7 @@ import {
 } from "./storage.js"
 import { estimateActiveContextSessionTokens } from "../context/context-usage.js"
 import type { StoredContextUsage } from "./storage.js"
+import { transitionSessionMode } from "./mode-transition.js"
 
 const SESSION_TITLE_MAX_LEN = 80
 
@@ -37,7 +38,13 @@ export function deriveSessionTitle(messages: SessionMessage[]): string {
     text = user.content
   } else if (Array.isArray(user.content)) {
     const part = (user.content as MessagePart[]).find((p) => p.type === "text")
-    if (part && "text" in part) text = part.text
+    if (part && "text" in part) {
+      text =
+        ("user_message" in part &&
+          typeof part.user_message === "string" &&
+          part.user_message.trim()) ||
+        part.text
+    }
   }
   const firstLine = text.trim().split(/\r?\n/)[0]?.trim() ?? ""
   return firstLine.slice(0, SESSION_TITLE_MAX_LEN)
@@ -63,6 +70,8 @@ export class Session implements ISession {
   private _mode: Mode | null = null
   /** Last verified durable journal revision used for optimistic concurrency. */
   private _revision: number
+  /** Non-plan mode restored when a pending plan is declined. */
+  private _planReturnMode: Exclude<Mode, "plan"> | null = null
 
   constructor(
     id: string,
@@ -74,6 +83,7 @@ export class Session implements ISession {
     revision = 0,
     providerContextAnchor?: ProviderContextAnchor | null,
     mode?: Mode | null,
+    planReturnMode?: Exclude<Mode, "plan"> | null,
   ) {
     this.id = id
     this.cwd = canonicalProjectRoot(cwd)
@@ -89,6 +99,7 @@ export class Session implements ISession {
         ? { ...providerContextAnchor }
         : null
     this._mode = mode ?? null
+    this._planReturnMode = planReturnMode ?? null
     this._revision = revision
   }
 
@@ -101,7 +112,30 @@ export class Session implements ISession {
   }
 
   setMode(mode: Mode): void {
-    this._mode = mode
+    const next = transitionSessionMode(
+      this._mode ?? undefined,
+      this._planReturnMode ?? undefined,
+      mode,
+    )
+    this._mode = next.mode
+    this._planReturnMode = next.planReturnMode ?? null
+  }
+
+  getPlanReturnMode(): Exclude<Mode, "plan"> | undefined {
+    return this._planReturnMode ?? undefined
+  }
+
+  getDurableRevision(): number {
+    return this._revision
+  }
+
+  acknowledgeDurableRevision(revision: number): void {
+    if (!Number.isSafeInteger(revision) || revision < this._revision) {
+      throw new Error(
+        `Cannot acknowledge older durable revision ${revision}; current revision is ${this._revision}.`,
+      )
+    }
+    this._revision = revision
   }
 
   invalidateTokenEstimate(): void {
@@ -251,6 +285,7 @@ export class Session implements ISession {
       0,
       anchor,
       this._mode,
+      this._planReturnMode,
     )
   }
 
@@ -334,6 +369,9 @@ export class Session implements ISession {
         ? { providerContextAnchor: this._providerContextAnchor }
         : {}),
       ...(this._mode ? { mode: this._mode } : {}),
+      ...(this._planReturnMode
+        ? { planReturnMode: this._planReturnMode }
+        : {}),
       messages: this._messages,
     }
     this._revision = await saveSession(stored, { expectedRevision: this._revision })
@@ -354,6 +392,7 @@ export class Session implements ISession {
         ? { ...stored.providerContextAnchor }
         : null
     this._mode = stored.mode ?? null
+    this._planReturnMode = stored.planReturnMode ?? null
     this._revision = stored.revision ?? 0
     this.invalidateTokenEstimate()
     return true
@@ -392,6 +431,7 @@ export class Session implements ISession {
       stored.revision ?? 0,
       stored.providerContextAnchor ?? null,
       stored.mode ?? null,
+      stored.planReturnMode ?? null,
     )
   }
 
@@ -408,6 +448,7 @@ export class Session implements ISession {
       loaded.meta.revision,
       null,
       loaded.meta.mode ?? null,
+      loaded.meta.planReturnMode ?? null,
     )
   }
 
@@ -432,3 +473,8 @@ export {
   UnsafeSessionIdError,
   getSessionStorageDiagnostics,
 } from "./storage.js"
+export {
+  transitionSessionMode,
+  type NonPlanMode,
+  type SessionModeState,
+} from "./mode-transition.js"

@@ -4,11 +4,54 @@ import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { Session } from "./index.js"
 import {
+  approvedPlanTodo,
   getPlanContentForFollowup,
   getSessionModeForResume,
 } from "./plan-followup.js"
 
 describe("plan follow-up recovery", () => {
+  it("materializes approved plan milestones as a visible executable todo", () => {
+    expect(
+      JSON.parse(
+        approvedPlanTodo(`# Plan
+
+## Steps
+1. Add the public API.
+2. Wire the UI.
+3. Verify the user flow.`),
+      ),
+    ).toEqual([
+      { id: "plan-1", content: "Add the public API.", status: "in_progress" },
+      { id: "plan-2", content: "Wire the UI.", status: "pending" },
+      { id: "plan-3", content: "Verify the user flow.", status: "pending" },
+    ])
+  })
+
+  it("falls back to one bounded implementation milestone for prose plans", () => {
+    expect(
+      JSON.parse(
+        approvedPlanTodo(
+          "# Plan\nImplement a compact, safe migration without changing public behavior.",
+        ),
+      ),
+    ).toEqual([
+      {
+        id: "plan-1",
+        content:
+          "Implement a compact, safe migration without changing public behavior.",
+        status: "in_progress",
+      },
+    ])
+  })
+
+  it("preserves underscores inside code identifiers in the visible todo", () => {
+    const todo = JSON.parse(
+      approvedPlanTodo("- Create a file containing `PLAN_OK`."),
+    ) as Array<{ content: string }>
+
+    expect(todo[0]?.content).toContain("PLAN_OK")
+  })
+
   it("prefers the durable session mode over legacy message inference", () => {
     const session = Session.createEphemeral(process.cwd())
     session.addMessage({ role: "user", content: "plan", mode: "plan" })

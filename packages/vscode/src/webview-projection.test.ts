@@ -4,9 +4,26 @@ import {
   projectAgentEventForWebview,
   projectExtensionMessageForWebview,
   projectSessionMessagesForWebview,
+  windowSessionMessagesForWebview,
 } from "./webview-projection.js"
 
 describe("webview output projection", () => {
+  it("bounds long live transcripts to the newest requested window", () => {
+    const messages = Array.from({ length: 1_000 }, (_, index) => ({
+      id: `message-${index}`,
+      ts: index,
+      role: "user" as const,
+      content: `message ${index}`,
+    }))
+
+    const visible = windowSessionMessagesForWebview(messages, 200)
+
+    expect(visible).toHaveLength(200)
+    expect(visible[0]?.id).toBe("message-800")
+    expect(visible.at(-1)?.id).toBe("message-999")
+    expect(messages).toHaveLength(1_000)
+  })
+
   it("removes legacy absolute spill paths while preserving opaque artifacts", () => {
     const messages = [
       {

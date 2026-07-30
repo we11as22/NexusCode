@@ -903,6 +903,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       type: "newMessage",
       clientMessageId,
       content: runContent,
+      ...(optimisticDisplay !== runContent
+        ? { displayText: optimisticDisplay }
+        : {}),
       mode: runMode,
       images: messageImages.length > 0 ? messageImages.map((img) => ({ data: img.data, mimeType: img.mimeType })) : undefined,
       presetName: runPresetName,
@@ -1786,7 +1789,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             compactionLog: [
               ...s.compactionLog,
               { id: `compaction_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, durationSec },
-            ],
+            ].slice(-24),
           }
         })
         break

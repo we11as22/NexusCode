@@ -2,7 +2,7 @@ import type { SessionMessage } from "../types.js"
 
 const MAX_ACTIVE_SUMMARY_CHARS = 48_000
 
-export function getLatestSummaryMessage(messages: SessionMessage[]): SessionMessage | undefined {
+export function getLatestSummaryMessage(messages: readonly SessionMessage[]): SessionMessage | undefined {
   for (let index = messages.length - 1; index >= 0; index--) {
     const message = messages[index]
     if (message?.summary) return message
@@ -10,20 +10,20 @@ export function getLatestSummaryMessage(messages: SessionMessage[]): SessionMess
   return undefined
 }
 
-export function getLatestSummaryIndex(messages: SessionMessage[]): number {
+export function getLatestSummaryIndex(messages: readonly SessionMessage[]): number {
   for (let index = messages.length - 1; index >= 0; index--) {
     if (messages[index]?.summary) return index
   }
   return -1
 }
 
-export function getActiveMessagesAfterLatestSummary(messages: SessionMessage[]): SessionMessage[] {
+export function getActiveMessagesAfterLatestSummary(messages: readonly SessionMessage[]): SessionMessage[] {
   const latestSummaryIndex = getLatestSummaryIndex(messages)
   if (latestSummaryIndex === -1) return messages.filter((message) => !message.summary)
   return messages.slice(latestSummaryIndex + 1).filter((message) => !message.summary)
 }
 
-export function getMessagesForActiveContext(messages: SessionMessage[]): SessionMessage[] {
+export function getMessagesForActiveContext(messages: readonly SessionMessage[]): SessionMessage[] {
   const latestSummaryIndex = getLatestSummaryIndex(messages)
   if (latestSummaryIndex === -1) return messages.filter((message) => !message.summary)
   const latestSummaryMessage = messages[latestSummaryIndex]

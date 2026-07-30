@@ -199,7 +199,10 @@ function sessionUserPlainText(msg: SessionMessage): string {
   const parts = content as MessagePart[]
   const lines: string[] = []
   for (const p of parts) {
-    if (p.type === 'text') lines.push((p as TextPart).text ?? '')
+    if (p.type === 'text') {
+      const text = p as TextPart & { user_message?: string }
+      lines.push(text.user_message?.trim() || text.text || '')
+    }
   }
   return lines.join('\n').trimEnd()
 }
@@ -295,6 +298,8 @@ export function replMessagesFromSession(messages: SessionMessage[]): MessageType
 export interface QueryNexusOptions {
   nexus: NexusBootstrapResult
   userPrompt: string
+  /** Short UI projection when the provider needs a longer host instruction. */
+  userDisplayPrompt?: string
   repoTools: Tool[]
   signal: AbortSignal
   tuiApprovalRef?: { current: ((r: PermissionResult) => void) | null }
@@ -320,6 +325,7 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
   const {
     nexus,
     userPrompt,
+    userDisplayPrompt,
     repoTools,
     signal,
     tuiApprovalRef,
@@ -347,7 +353,18 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
   session.setMode(mode)
   // Local loop mutates this Session; server persists via HTTP and adds the user turn in runSession.
   if (!serverUrl) {
-    session.addMessage({ role: 'user', content: userPrompt, mode })
+    session.addMessage({
+      role: 'user',
+      content:
+        userDisplayPrompt?.trim() && userDisplayPrompt.trim() !== userPrompt.trim()
+          ? [{
+              type: 'text',
+              text: userPrompt,
+              user_message: userDisplayPrompt.trim(),
+            }]
+          : userPrompt,
+      mode,
+    })
   }
 
   let config = await loadCliWorkspaceConfig(nexus.cwd, {
@@ -539,6 +556,26 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
     const sid = bootstrapSession.id
     runPromise = (async () => {
       try {
+        const refreshRemoteShadow = async (): Promise<Session> => {
+          const meta = await serverClient.getSession(sid)
+          const limit = 200
+          const messages = await serverClient.getMessages(sid, {
+            limit,
+            offset: Math.max(0, meta.messageCount - limit),
+          })
+          return new Session(
+            sid,
+            nexus.cwd,
+            messages,
+            meta.todo,
+            true,
+            null,
+            0,
+            null,
+            meta.mode ?? null,
+            meta.planReturnMode ?? null,
+          )
+        }
         const cursorStore = nexus.remoteTurnCursorStore
         if (!cursorStore) {
           throw new Error('Remote turn cursor store is not configured')
@@ -549,8 +586,7 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
             event.type === 'compaction_end'
           ) {
             try {
-              const msgs = await serverClient.getRecentMessages(sid)
-              session = new Session(sid, nexus.cwd, msgs, undefined, true)
+              session = await refreshRemoteShadow()
             } catch {
               // Keep the last known session shadow.
             }
@@ -580,7 +616,13 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
             await runRemoteCliTurn({
               client: serverClient,
               sessionId: sid,
-              input: [{ type: 'text', text: userPrompt }],
+              input: [{
+                type: 'text',
+                text: userPrompt,
+                ...(userDisplayPrompt?.trim()
+                  ? { user_message: userDisplayPrompt.trim() }
+                  : {}),
+              }],
               mode,
               signal,
               approvalRef: tuiApprovalRef,
@@ -594,7 +636,13 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
                   version: 1,
                   phase: 'prepared',
                   ...prepared,
-                  input: [{ type: 'text', text: userPrompt }],
+                  input: [{
+                    type: 'text',
+                    text: userPrompt,
+                    ...(userDisplayPrompt?.trim()
+                      ? { user_message: userDisplayPrompt.trim() }
+                      : {}),
+                  }],
                   mode,
                 })
               },
@@ -639,8 +687,7 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
           if (!signal.aborted) await cursorStore.clear(sid)
         }
         try {
-          const msgs = await serverClient.getRecentMessages(sid)
-          session = new Session(sid, nexus.cwd, msgs, undefined, true)
+          session = await refreshRemoteShadow()
         } catch {
           // Keep the session from the latest assistant_content_complete.
         }

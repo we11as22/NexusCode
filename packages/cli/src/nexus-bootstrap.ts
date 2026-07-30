@@ -552,12 +552,13 @@ export async function bootstrapNexus(opts: {
         meta.id,
         cwd,
         messages,
-        undefined,
+        meta.todo,
         true,
         null,
         0,
         null,
         meta.mode ?? null,
+        meta.planReturnMode ?? null,
       )
     } catch (error) {
       if (error instanceof Error && /\b404\b/.test(error.message)) return null

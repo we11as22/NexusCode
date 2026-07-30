@@ -28,6 +28,17 @@ export interface CheckpointEntry {
   messageId?: string
 }
 
+export function checkpointDisplayLabel(
+  entry: CheckpointEntry,
+  index: number,
+): string {
+  if (!entry.description?.trim()) return `Checkpoint ${index + 1}`
+  const description = entry.description.trim()
+  return description.length > 28
+    ? `${description.slice(0, 28)}…`
+    : description
+}
+
 export function CheckpointStrip() {
   const store = useChatStore()
   const entries = store.checkpointEntries
@@ -66,11 +77,6 @@ export function CheckpointStrip() {
     )
   }
 
-  const label = (entry: CheckpointEntry) =>
-    entry.description
-      ? (entry.description.length > 20 ? entry.description.slice(0, 20) + "…" : entry.description)
-      : entry.hash.slice(0, 7)
-
   return (
     <div className="nexus-checkpoint-strip nexus-checkpoint-strip-cline">
       <div className="nexus-checkpoint-strip-inner">
@@ -79,11 +85,14 @@ export function CheckpointStrip() {
         <span className="nexus-checkpoint-label">Checkpoints</span>
         <div className="nexus-checkpoint-dotted" aria-hidden />
         <div className="nexus-checkpoint-entries">
-          {entries.map((entry) => (
+          {entries.map((entry, index) => (
             <div key={entry.hash} className="nexus-checkpoint-entry-wrap">
               <div className="nexus-checkpoint-entry">
-                <span className="nexus-checkpoint-entry-label" title={entry.description ?? entry.hash}>
-                  {label(entry)}
+                <span
+                  className="nexus-checkpoint-entry-label"
+                  title={entry.description?.trim() || `Checkpoint ${index + 1}`}
+                >
+                  {checkpointDisplayLabel(entry, index)}
                 </span>
                 <button
                   type="button"

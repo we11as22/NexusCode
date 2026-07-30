@@ -73,6 +73,7 @@ import {
   buildIndexWatcherGlobPattern,
   ensureQdrantRunning,
   getModelsCatalog,
+  approvedPlanTodo,
   hadPlanExit,
   getPlanContentForFollowup,
   getSessionModeForResume,
@@ -161,6 +162,7 @@ import {
   pendingWriteApprovalPreviewFromEvent,
   type PendingWriteApprovalPreview,
 } from "./pending-approval-preview.js"
+import { windowSessionMessagesForWebview } from "./webview-projection.js"
 
 export type { WebviewMessage } from "./webview-protocol.js"
 
@@ -520,6 +522,8 @@ export class Controller {
   private remoteResumePromise?: Promise<boolean>
   /** For server sessions: offset of the oldest loaded message (0 = all loaded). Used for "Load older" pagination. */
   private serverSessionOldestLoadedOffset: number | undefined = undefined
+  /** Maximum number of transcript rows projected into the webview. */
+  private webviewMessageLimit = INITIAL_SERVER_MESSAGES
   private loadingOlderMessages = false
   /** When using server: connection state and error for UI. */
   private serverConnectionState: ServerConnectionState = "idle"
@@ -588,6 +592,10 @@ export class Controller {
     return this.webviewPathCapabilities
       .resolveWorkspacePath(cwd, filePath)
       .replace(/\\/g, "/")
+  }
+
+  private resetWebviewMessageWindow(): void {
+    this.webviewMessageLimit = INITIAL_SERVER_MESSAGES
   }
 
   private updatePendingWriteApprovalPreview(event: AgentEvent): void {
@@ -1350,6 +1358,7 @@ export class Controller {
       this.remoteWorkspaceStateCache = undefined
       this.serverSessionId = undefined
       this.serverSessionOldestLoadedOffset = undefined
+      this.resetWebviewMessageWindow()
       this.activeRemoteTurn = undefined
       this.remoteResumePromise = undefined
       this.forcedRemoteModeForNextRun = null
@@ -1466,6 +1475,9 @@ export class Controller {
         return { client, sessionId: this.serverSessionId }
       }
       const created = await client.createSession()
+      const pendingTodo = this.session?.getTodo() ?? ""
+      const pendingMode = this.session?.getMode()
+      const pendingPlanReturnMode = this.session?.getPlanReturnMode()
       if (
         this.disposed ||
         this.getServerUrl() !== serverUrl ||
@@ -1477,13 +1489,32 @@ export class Controller {
       }
       await this.getRemoteWorkspaceState(cwd)
         .setSelectedSessionId(created.id)
-      this.session = new Session(created.id, cwd, [], undefined, true)
+      this.session = new Session(
+        created.id,
+        cwd,
+        [],
+        pendingTodo,
+        true,
+        null,
+        0,
+        null,
+        pendingMode ?? created.mode ?? null,
+        pendingPlanReturnMode ?? created.planReturnMode ?? null,
+      )
       this.serverSessionId = created.id
       this.serverSessionOldestLoadedOffset = undefined
+      this.resetWebviewMessageWindow()
       this.localSessionWindowed = false
       this.pendingQuestionRequest = null
       this.checkpoint = undefined
       this.postStateToWebview()
+      if (pendingMode || pendingTodo) {
+        await client.setSessionMode(
+          created.id,
+          pendingMode ?? "agent",
+          { todo: pendingTodo },
+        )
+      }
       void this.sendSessionList().catch(() => undefined)
       return { client, sessionId: created.id }
     })()
@@ -1540,12 +1571,13 @@ export class Controller {
       sessionId,
       cwd,
       messages,
-      undefined,
+      meta.todo,
       true,
       null,
       0,
       null,
       meta.mode ?? null,
+      meta.planReturnMode ?? null,
     )
     this.mode = getSessionModeForResume(this.session, this.mode)
     this.serverSessionOldestLoadedOffset = offset
@@ -1680,11 +1712,20 @@ export class Controller {
     this.mode = getSessionModeForResume(loaded, this.mode)
     loaded.setMode(this.mode)
     if (meta.mode !== this.mode) {
-      await mutateSession(sessionId, cwd, (stored) => ({
-        ...stored,
-        mode: this.mode,
-        ts: stored.ts,
-      }))
+      const updated = await mutateSession(
+        sessionId,
+        cwd,
+        (stored) => ({
+          ...stored,
+          mode: this.mode,
+          planReturnMode: loaded.getPlanReturnMode(),
+          ts: stored.ts,
+        }),
+        { expectedRevision: loaded.getDurableRevision() },
+      )
+      if (updated) {
+        loaded.acknowledgeDurableRevision(updated.revision ?? 0)
+      }
     }
     this.serverSessionId = undefined
     this.serverSessionOldestLoadedOffset = offset
@@ -1953,7 +1994,12 @@ export class Controller {
         contextPendingTokens = m.pendingTokens
       }
     }
-    const messages = stripModeReminderFromMessages(this.session.messages)
+    const completeMessages =
+      stripModeReminderFromMessages(this.session.messages)
+    const messages = windowSessionMessagesForWebview(
+      completeMessages,
+      this.webviewMessageLimit,
+    )
     return {
       messages,
       mode: this.mode,
@@ -1987,7 +2033,12 @@ export class Controller {
       planCompleted:
         this.session && this.mode === "plan" && !this.isRunning && hadPlanExit(this.session),
       planFollowupText: null,
-      hasOlderMessages: this.serverSessionOldestLoadedOffset != null && this.serverSessionOldestLoadedOffset > 0,
+      hasOlderMessages:
+        (
+          this.serverSessionOldestLoadedOffset != null &&
+          this.serverSessionOldestLoadedOffset > 0
+        ) ||
+        messages.length < completeMessages.length,
       loadingOlderMessages: this.loadingOlderMessages,
       sessionUnacceptedEdits: this.getSessionUnacceptedEditsForState(),
       pendingQuestionRequest: this.pendingQuestionRequest,
@@ -2333,20 +2384,31 @@ export class Controller {
     if (serverUrl && this.serverSessionId) {
       try {
         await (await this.createServerClient(cwd))
-          .setSessionMode(this.serverSessionId, mode)
+          .setSessionMode(this.serverSessionId, mode, {
+            todo: session.getTodo(),
+          })
       } catch (error) {
         this.reportServerError(error)
       }
       return
     }
 
-    const updated = await mutateSession(session.id, cwd, (stored) => ({
-      ...stored,
-      mode,
-      ts: Date.now(),
-    }))
+    const updated = await mutateSession(
+      session.id,
+      cwd,
+      (stored) => ({
+        ...stored,
+        mode,
+        planReturnMode: session.getPlanReturnMode(),
+        todo: session.getTodo(),
+        ts: Date.now(),
+      }),
+      { expectedRevision: session.getDurableRevision() },
+    )
     if (!updated) {
       await session.save()
+    } else {
+      session.acknowledgeDurableRevision(updated.revision ?? 0)
     }
   }
 
@@ -2417,6 +2479,7 @@ export class Controller {
       await remoteState.setSelectedSessionId(undefined)
     }
     this.session = undefined
+    this.resetWebviewMessageWindow()
     this.sessionUnacceptedEdits = []
     this.changeSetReviewSessionId = null
     this.serverSessionOldestLoadedOffset = undefined
@@ -2541,6 +2604,7 @@ export class Controller {
             msg.presetName,
             reportAdmission,
             msg.clientMessageId,
+            msg.displayText,
           )
         } finally {
           reportAdmission(false)
@@ -3532,13 +3596,14 @@ export class Controller {
         break
       case "planFollowupChoice": {
         if (msg.choice === "abandon") {
-          await this.persistSessionMode("agent")
+          const returnMode =
+            this.session?.getPlanReturnMode() ?? "agent"
+          await this.persistSessionMode(returnMode)
           this.postStateToWebview()
           break
         }
         const cwd = this.getCwd()
         if (msg.choice === "implement") {
-          this.mode = "agent"
           const planText =
             msg.planText?.trim() ||
             (this.session ? await getPlanContentForFollowup(this.session, cwd) : "")
@@ -3548,6 +3613,9 @@ export class Controller {
           if (msg.newSession && this.session) {
             const freshPlanText = planText || (await getPlanContentForFollowup(this.session, cwd))
             this.session = Session.create(cwd)
+            this.resetWebviewMessageWindow()
+            this.session.setMode("agent")
+            this.session.updateTodo(approvedPlanTodo(freshPlanText))
             if (!this.getServerUrl()) {
               await this.session.save()
               await this.setSelectedLocalSessionId(this.session.id, cwd)
@@ -3562,9 +3630,30 @@ export class Controller {
             }
             this.localSessionWindowed = false
             this.postStateToWebview()
-            await this.runAgent(`Implement the following plan:\n\n${freshPlanText}`, "agent")
+            await this.runAgent(
+              `Implement the following plan:\n\n${freshPlanText}`,
+              "agent",
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+              "Implement this plan in a new session",
+            )
           } else {
-            await this.runAgent(continueContent, "agent")
+            if (this.session) {
+              this.session.updateTodo(approvedPlanTodo(planText))
+              await this.persistSessionMode("agent")
+              this.postStateToWebview()
+            }
+            await this.runAgent(
+              continueContent,
+              "agent",
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+              "Implement this plan",
+            )
           }
           break
         }
@@ -3575,7 +3664,15 @@ export class Controller {
             (this.session ? await getPlanContentForFollowup(this.session, cwd) : "")
           const instruction = msg.instruction?.trim() || "Improve the plan based on the user's feedback."
           const reviseContent = `Revise the current implementation plan based on this feedback.\n\nCurrent plan:\n${planText || "(no extracted plan text)"}\n\nUser feedback / requested changes:\n${instruction}\n\nDo not implement the code. Update the plan file in .nexus/plans/ and call PlanExit again when the revised plan is ready.`
-          await this.runAgent(reviseContent, "plan")
+          await this.runAgent(
+            reviseContent,
+            "plan",
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            `Revise plan → ${instruction}`,
+          )
         }
         break
       }
@@ -4229,6 +4326,7 @@ export class Controller {
     presetName?: string,
     onAdmission?: (accepted: boolean) => void,
     clientMessageId?: string,
+    displayText?: string,
   ): Promise<void> {
     if (this.isRunning) return
     if (this.configurationError) {
@@ -4436,13 +4534,30 @@ Return in this format:
     }
 
     // Do NOT prepend mode reminder to user message — mode is in system prompt and API; keeps UI clean.
+    const displayProjection = displayText?.trim()
+    const hasDisplayProjection =
+      Boolean(displayProjection) && displayProjection !== actualContent.trim()
     const userContent: string | import("@nexuscode/core").MessagePart[] =
       images != null && images.length > 0
         ? [
-            ...(actualContent.trim() ? [{ type: "text" as const, text: actualContent }] : []),
+            ...(actualContent.trim()
+              ? [{
+                  type: "text" as const,
+                  text: actualContent,
+                  ...(hasDisplayProjection
+                    ? { user_message: displayProjection }
+                    : {}),
+                }]
+              : []),
             ...images.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType })),
           ]
-        : actualContent
+        : hasDisplayProjection
+          ? [{
+              type: "text" as const,
+              text: actualContent,
+              user_message: displayProjection!,
+            }]
+          : actualContent
     const userMessage = this.session.addMessage(
       {
         role: "user",
@@ -5327,6 +5442,19 @@ Return in this format:
     const serverUrl = this.getServerUrl()
     const cwd = this.getCwd()
     if (
+      !serverUrl &&
+      this.session &&
+      !this.localSessionWindowed &&
+      this.session.messages.length > this.webviewMessageLimit
+    ) {
+      this.webviewMessageLimit = Math.min(
+        this.session.messages.length,
+        this.webviewMessageLimit + INITIAL_SERVER_MESSAGES,
+      )
+      this.postStateToWebview()
+      return
+    }
+    if (
       !this.session ||
       this.serverSessionOldestLoadedOffset == null ||
       this.serverSessionOldestLoadedOffset <= 0
@@ -5364,12 +5492,19 @@ Return in this format:
         this.session.id,
         cwd,
         [...dedupedOlder, ...this.session.messages],
-        undefined,
+        this.session.getTodo(),
         Boolean(serverUrl) || offset > 0,
-        null,
+        this.session.getLastContextUsageSnapshot(),
         localRevision,
+        this.session.getProviderContextAnchor(),
+        this.session.getMode() ?? null,
+        this.session.getPlanReturnMode() ?? null,
       )
       this.serverSessionOldestLoadedOffset = offset
+      this.webviewMessageLimit = Math.max(
+        this.webviewMessageLimit,
+        this.session.messages.length,
+      )
       if (!serverUrl) this.localSessionWindowed = offset > 0
     } catch (error) {
       if (serverUrl) this.reportServerError(error)
@@ -5387,6 +5522,7 @@ Return in this format:
       return
     }
     this.lastRunMode = null
+    this.resetWebviewMessageWindow()
     this.forcedRemoteModeForNextRun = null
     const cwd = this.getCwd()
     const serverUrl = this.getServerUrl()
@@ -5399,8 +5535,18 @@ Return in this format:
           limit: INITIAL_SERVER_MESSAGES,
           offset,
         })
-        this.session = new Session(sessionId, cwd, messages, undefined, true)
-        if (meta.mode) this.session.setMode(meta.mode)
+        this.session = new Session(
+          sessionId,
+          cwd,
+          messages,
+          meta.todo,
+          true,
+          null,
+          0,
+          null,
+          meta.mode ?? null,
+          meta.planReturnMode ?? null,
+        )
         this.mode = getSessionModeForResume(this.session, this.mode)
         this.serverSessionId = sessionId
         await this.getRemoteWorkspaceState(cwd)
@@ -5444,6 +5590,7 @@ Return in this format:
       return
     }
     this.lastRunMode = null
+    this.resetWebviewMessageWindow()
     this.forcedRemoteModeForNextRun = null
     const cwd = this.getCwd()
     const serverUrl = this.getServerUrl()

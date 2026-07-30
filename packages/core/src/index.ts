@@ -207,8 +207,13 @@ export {
   SessionCorruptionError,
   UnsafeSessionIdError,
   getSessionStorageDiagnostics,
+  transitionSessionMode,
 } from "./session/index.js"
-export type { SessionRecoverySnapshot } from "./session/index.js"
+export type {
+  NonPlanMode,
+  SessionModeState,
+  SessionRecoverySnapshot,
+} from "./session/index.js"
 export type {
   DeleteSessionOptions,
   PersistedToolOutputProtection,
@@ -221,6 +226,7 @@ export type {
   StoredContextUsage,
 } from "./session/storage.js"
 export {
+  approvedPlanTodo,
   hadPlanExit,
   getPlanContentForFollowup,
   getSessionModeForResume,
@@ -245,6 +251,7 @@ export type {
   NexusServerClientOptions,
   RemoteChangeReviewEntry,
   RemoteChangeReviewSnapshot,
+  RemoteSessionMeta,
   RunSessionTurnOptions,
   SessionApprovalIdentity,
   SessionTurnIdentity,

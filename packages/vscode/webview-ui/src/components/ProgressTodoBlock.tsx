@@ -1,9 +1,13 @@
 import React, { useState, useRef, useEffect, useMemo, useLayoutEffect } from "react"
 import { NEXUS_CHAT_LAYOUT_EVENT } from "../constants/chatLayoutEvent.js"
 
+const useBrowserLayoutEffect =
+  typeof window === "undefined" ? useEffect : useLayoutEffect
+
 export interface TodoItem {
   id: number
   done: boolean
+  cancelled: boolean
   label: string
   inProgress: boolean
 }
@@ -26,8 +30,9 @@ export function parseTodo(todo: string): TodoItem[] {
         id: i,
         done:
           typeof item.status === "string"
-            ? item.status === "completed" || item.status === "cancelled"
+            ? item.status === "completed"
             : Boolean(item.done),
+        cancelled: item.status === "cancelled",
         label:
           typeof item.content === "string"
             ? item.content
@@ -48,9 +53,9 @@ export function parseTodo(todo: string): TodoItem[] {
     const pending = /^-\s*\[\s*\]/.test(line)
     const label = line.replace(/^-\s*\[[xX\s]\]\s*/, "").trim()
     if (pending || done) {
-      items.push({ id: i, done, label, inProgress: false })
+      items.push({ id: i, done, cancelled: false, label, inProgress: false })
     } else if (label) {
-      items.push({ id: i, done: false, label, inProgress: false })
+      items.push({ id: i, done: false, cancelled: false, label, inProgress: false })
     }
   })
   return items
@@ -61,7 +66,7 @@ export function useTodoWithProgress(todo: string, isRunning: boolean): { items: 
   const completedCount = items.filter((i) => i.done).length
   const total = items.length
   const explicitInProgressIndex = items.findIndex((i) => i.inProgress)
-  const firstPendingIndex = items.findIndex((i) => !i.done)
+  const firstPendingIndex = items.findIndex((i) => !i.done && !i.cancelled)
   const inProgressIndex =
     explicitInProgressIndex >= 0
       ? explicitInProgressIndex
@@ -70,7 +75,10 @@ export function useTodoWithProgress(todo: string, isRunning: boolean): { items: 
         : -1
   const withProgress = items.map((item, idx) => ({
     ...item,
-    inProgress: idx === inProgressIndex && !item.done,
+    inProgress:
+      idx === inProgressIndex &&
+      !item.done &&
+      !item.cancelled,
   }))
   const currentIndex = inProgressIndex >= 0 ? inProgressIndex + 1 : completedCount
   return { items: withProgress, currentIndex, total }
@@ -80,7 +88,7 @@ export function useTodoWithProgress(todo: string, isRunning: boolean): { items: 
 function getMostImportantTodo(items: TodoItem[]): TodoItem | null {
   const inProgress = items.find((i) => i.inProgress)
   if (inProgress) return inProgress
-  return items.find((i) => !i.done) ?? null
+  return items.find((i) => !i.done && !i.cancelled) ?? null
 }
 
 function CheckIcon({ className }: { className?: string }) {
@@ -119,10 +127,11 @@ function CircleIcon({ className }: { className?: string }) {
   )
 }
 
-function FilledCircleIcon({ className }: { className?: string }) {
+function CancelledIcon({ className }: { className?: string }) {
   return (
-    <svg className={className} viewBox="0 0 24 24" fill="currentColor">
-      <circle cx="12" cy="12" r="8" />
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+      <circle cx="12" cy="12" r="9" />
+      <path d="M8 8l8 8M16 8l-8 8" />
     </svg>
   )
 }
@@ -135,12 +144,13 @@ interface Props {
 }
 
 export function ProgressTodoBlock({ todo, isRunning, header }: Props) {
-  const [open, setOpen] = useState(true)
   const listRef = useRef<HTMLUListElement>(null)
   const itemRefs = useRef<(HTMLDivElement | null)[]>([])
   const { items, currentIndex, total } = useTodoWithProgress(todo, isRunning)
   const completedCount = items.filter((i) => i.done).length
   const allCompleted = total > 0 && completedCount === total
+  const [open, setOpen] = useState(() => !allCompleted)
+  const previouslyCompleted = useRef(allCompleted)
   const mostImportant = useMemo(() => getMostImportantTodo(items), [items])
   const scrollIndex = items.findIndex((i) => i.inProgress) >= 0 ? items.findIndex((i) => i.inProgress) : items.findIndex((i) => !i.done)
 
@@ -156,11 +166,22 @@ export function ProgressTodoBlock({ todo, isRunning, header }: Props) {
     }
   }, [open, items, scrollIndex])
 
-  useLayoutEffect(() => {
+  useBrowserLayoutEffect(() => {
     window.dispatchEvent(new CustomEvent(NEXUS_CHAT_LAYOUT_EVENT))
   }, [open, items.length])
 
+  useEffect(() => {
+    if (!previouslyCompleted.current && allCompleted && !isRunning) {
+      setOpen(false)
+    }
+    previouslyCompleted.current = allCompleted
+  }, [allCompleted, isRunning])
+
   if (items.length === 0) return null
+  // OpenClaude clears the live todo state once every item is complete. Hide
+  // legacy/restored snapshots that predate that lifecycle rule as well; the
+  // completed TodoWrite event remains available in the transcript.
+  if (allCompleted && !isRunning) return null
 
   return (
     <div
@@ -180,7 +201,9 @@ export function ProgressTodoBlock({ todo, isRunning, header }: Props) {
           <ListIcon className="w-4 h-4" />
         </span>
         <span className="flex-1 min-w-0 truncate">
-          To-dos {total}
+          {allCompleted
+            ? `To-dos ${completedCount}/${total} completed`
+            : `To-dos ${total}`}
         </span>
         <span
           className="flex-shrink-0 text-[var(--vscode-descriptionForeground)] transition-transform"
@@ -210,7 +233,12 @@ export function ProgressTodoBlock({ todo, isRunning, header }: Props) {
                     <SpinnerIcon className="w-4 h-4" />
                   </span>
                 )}
-                {!item.done && !item.inProgress && (
+                {item.cancelled && (
+                  <span className="text-[var(--vscode-descriptionForeground)] flex items-center justify-center">
+                    <CancelledIcon className="w-4 h-4" />
+                  </span>
+                )}
+                {!item.done && !item.cancelled && !item.inProgress && (
                   <span className="text-[var(--vscode-descriptionForeground)]">
                     <CircleIcon className="w-4 h-4" />
                   </span>
@@ -220,6 +248,8 @@ export function ProgressTodoBlock({ todo, isRunning, header }: Props) {
                 className={
                   item.done
                     ? "text-[var(--vscode-descriptionForeground)] line-through flex-1 min-w-0 truncate"
+                    : item.cancelled
+                      ? "text-[var(--vscode-descriptionForeground)] line-through flex-1 min-w-0 truncate"
                     : "flex-1 min-w-0 truncate"
                 }
               >

@@ -1,4 +1,5 @@
 import type { ToolPart } from "../stores/chat.js"
+import type { ApprovalActionView } from "../types/approval.js"
 
 export type FileChangePreviewLine = {
   type: "add" | "remove"
@@ -11,6 +12,67 @@ export type FileChangePreview = {
   hiddenLineCount: number
   statusOnly: boolean
   stats: { added: number; removed: number }
+}
+
+const MAX_APPROVAL_DIFF_LINES = 200
+
+/**
+ * Parse the authoritative unified diff attached to a write approval. This is
+ * the exact proposal produced by the core before the file is mutated, not
+ * human-readable tool output. The bounded projection lets the same inline
+ * diff component render before and after approval.
+ */
+function approvalDiffHunks(
+  diff: string,
+): NonNullable<ToolPart["diffHunks"]> {
+  const hunks: NonNullable<ToolPart["diffHunks"]> = []
+  let oldLine = 0
+  let newLine = 0
+  let inHunk = false
+
+  for (const line of diff.split(/\r?\n/u)) {
+    const header = /^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@/u.exec(line)
+    if (header) {
+      oldLine = Number.parseInt(header[1]!, 10)
+      newLine = Number.parseInt(header[2]!, 10)
+      inHunk = true
+      continue
+    }
+    if (!inHunk || line.startsWith("\\ No newline at end of file")) continue
+    if (line.startsWith("-") && !line.startsWith("---")) {
+      hunks.push({ type: "remove", lineNum: oldLine, line: line.slice(1) })
+      oldLine += 1
+    } else if (line.startsWith("+") && !line.startsWith("+++")) {
+      hunks.push({ type: "add", lineNum: newLine, line: line.slice(1) })
+      newLine += 1
+    } else if (line.startsWith(" ")) {
+      oldLine += 1
+      newLine += 1
+    }
+    if (hunks.length >= MAX_APPROVAL_DIFF_LINES) break
+  }
+  return hunks
+}
+
+export function withPendingApprovalPreview(
+  part: ToolPart,
+  action: ApprovalActionView | null | undefined,
+): ToolPart {
+  if (!action || action.type !== "write") return part
+  const parsed =
+    typeof action.diff === "string" && action.diff.trim().length > 0
+      ? approvalDiffHunks(action.diff)
+      : []
+  return {
+    ...part,
+    path: part.path ?? action.path,
+    diffStats: part.diffStats ?? action.diffStats,
+    ...(part.diffHunks?.length
+      ? { diffHunks: part.diffHunks }
+      : parsed.length > 0
+        ? { diffHunks: parsed }
+        : {}),
+  }
 }
 
 function exactHunks(part: ToolPart): FileChangePreviewLine[] {

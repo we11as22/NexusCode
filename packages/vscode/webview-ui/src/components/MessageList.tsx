@@ -6,6 +6,7 @@ import {
   ToolCallCard,
   InlineFileEditBlock,
 } from "./ToolCallCard.js"
+import { withPendingApprovalPreview } from "./fileChangePreview.js"
 import { NEXUS_CHAT_LAYOUT_EVENT } from "../constants/chatLayoutEvent.js"
 import { NEXUS_QUESTIONNAIRE_RESPONSE_PREFIX } from "../constants/questionnaire.js"
 import { ExploredSummaryInline } from "./ExploredProgressBlock.js"
@@ -29,6 +30,9 @@ import {
   isPureSubagentParallelInput,
 } from "../transcript/helpers.js"
 import { shouldFollowNewContent } from "./native-scroll-policy.js"
+
+const useBrowserLayoutEffect =
+  typeof window === "undefined" ? useEffect : useLayoutEffect
 
 const FILE_EDIT_TOOLS = new Set(["replace_in_file", "write_to_file", "Edit", "Write"])
 const BASH_OUTPUT_TAIL_LINES = 80
@@ -202,7 +206,7 @@ export function BashCommandBlock({
     }
   }
 
-  useLayoutEffect(() => {
+  useBrowserLayoutEffect(() => {
     onListLayoutHint?.()
   }, [expanded, onListLayoutHint, part.output, part.status, part.error])
 
@@ -390,13 +394,13 @@ export function MessageList({ messages, isRunning = false, hasOlderMessages = fa
     })
   }, [flushPinToBottom])
 
-  useLayoutEffect(() => {
+  useBrowserLayoutEffect(() => {
     if (!stickToBottomRef.current) return
     flushPinToBottom()
     schedulePinToBottom()
   }, [renderedMessages, flushPinToBottom, schedulePinToBottom])
 
-  useLayoutEffect(() => {
+  useBrowserLayoutEffect(() => {
     const content = contentRef.current
     if (!content || typeof ResizeObserver === "undefined") return
     const observer = new ResizeObserver(() => {
@@ -626,7 +630,10 @@ function RenderItemRow({
         ? message.content
         : (message.content as MessagePart[])
             .filter(p => p.type === "text")
-            .map(p => (p as { text: string }).text)
+            .map((p) => {
+              const textPart = p as { text: string; user_message?: string }
+              return textPart.user_message?.trim() || textPart.text
+            })
             .join("")
     if (userText.startsWith(NEXUS_QUESTIONNAIRE_RESPONSE_PREFIX)) {
       const body = userText.slice(NEXUS_QUESTIONNAIRE_RESPONSE_PREFIX.length).trim()
@@ -1294,11 +1301,21 @@ function AssistantPartRow({
       return <SubagentInlineList items={getSubagentDisplayItems(toolPart)} />
     }
     if (toolPart.tool === "replace_in_file" || toolPart.tool === "write_to_file" || toolPart.tool === "Edit" || toolPart.tool === "Write") {
+      const matchingApproval =
+        pendingApproval?.partId === toolPart.id
+          ? pendingApproval.action
+          : undefined
       const approval =
-        pendingApproval?.partId === toolPart.id ? (
-          <ApprovalInline action={pendingApproval.action} onResolve={onResolveApproval} />
+        matchingApproval ? (
+          <ApprovalInline action={matchingApproval} onResolve={onResolveApproval} />
         ) : undefined
-      return <InlineFileEditBlock part={toolPart} approval={approval} onLayoutHint={onListLayoutHint} />
+      return (
+        <InlineFileEditBlock
+          part={withPendingApprovalPreview(toolPart, matchingApproval)}
+          approval={approval}
+          onLayoutHint={onListLayoutHint}
+        />
+      )
     }
     if (toolPart.tool === "ApplyPatch" && (toolPart.changeFiles?.length ?? 0) > 0) {
       const approval =

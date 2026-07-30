@@ -5,7 +5,7 @@ import type { StateConnection } from "./schema.js"
 export type InputDelivery = "steer" | "queue"
 
 export type UserInputPartRecord =
-  | { type: "text"; text: string }
+  | { type: "text"; text: string; user_message?: string }
   | { type: "image"; data: string; mimeType: string }
   | { type: "mention"; name: string; path: string }
   | { type: "skill"; name: string }
@@ -101,8 +101,24 @@ function normalizeParts(
       if (typeof part.text !== "string" || part.text.length === 0) {
         throw new Error("Text input parts must not be empty")
       }
+      if (
+        part.user_message !== undefined &&
+        (typeof part.user_message !== "string" ||
+          part.user_message.trim().length === 0 ||
+          part.user_message.length > 16_384)
+      ) {
+        throw new Error(
+          "Text input display projections must contain from 1 to 16384 characters",
+        )
+      }
       textCharacters += part.text.length
-      return { type: "text", text: part.text }
+      return {
+        type: "text",
+        text: part.text,
+        ...(part.user_message
+          ? { user_message: part.user_message.trim() }
+          : {}),
+      }
     }
     if (part.type === "mention") {
       if (

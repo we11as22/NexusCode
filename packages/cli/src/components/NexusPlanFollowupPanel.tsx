@@ -10,7 +10,7 @@ type Props = {
   planText: string
   onImplement: () => void | Promise<void>
   onRevise: (instruction: string) => void | Promise<void>
-  onAbandon: () => void
+  onAbandon: () => void | Promise<void>
 }
 
 export function NexusPlanFollowupPanel({
@@ -75,7 +75,7 @@ export function NexusPlanFollowupPanel({
       return
     }
     if (input === '3') {
-      onAbandon()
+      void onAbandon()
       return
     }
     if (key.return) {
@@ -84,7 +84,7 @@ export function NexusPlanFollowupPanel({
       } else if (selectedIndex === 1) {
         setMode('instruct')
       } else {
-        onAbandon()
+        void onAbandon()
       }
     }
   })

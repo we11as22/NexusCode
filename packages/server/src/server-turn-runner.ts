@@ -11,6 +11,7 @@ import {
   type ApprovalAction,
   type MessagePart,
   type Mode,
+  type NonPlanMode,
   type NexusRunServices,
   type ProviderContextAnchor,
   type SessionMessage,
@@ -38,7 +39,13 @@ function approvalId(turnId: string, partId: string): string {
 
 function inputContent(context: TurnRunnerContext): string | MessagePart[] {
   const parts: MessagePart[] = context.input.parts.map((part): MessagePart => {
-    if (part.type === "text") return { type: "text", text: part.text }
+    if (part.type === "text") {
+      return {
+        type: "text",
+        text: part.text,
+        ...(part.user_message ? { user_message: part.user_message } : {}),
+      }
+    }
     if (part.type === "image") {
       return {
         type: "image",
@@ -54,7 +61,9 @@ function inputContent(context: TurnRunnerContext): string | MessagePart[] {
     }
     return { type: "text", text: `$${part.name}` }
   })
-  return parts.length === 1 && parts[0]?.type === "text"
+  return parts.length === 1 &&
+    parts[0]?.type === "text" &&
+    !parts[0].user_message
     ? parts[0].text
     : parts
 }
@@ -92,6 +101,7 @@ export interface ServerTurnSessionStore {
     title?: string
     todo?: string
     mode?: Mode
+    planReturnMode?: NonPlanMode
     contextUsage?: StoredContextUsage
     providerContextAnchor?: ProviderContextAnchor
   }>
@@ -103,6 +113,7 @@ export interface ServerTurnSessionStore {
       title?: string
       todo?: string
       mode?: Mode
+      planReturnMode?: NonPlanMode
       contextUsage?: StoredContextUsage
       providerContextAnchor?: ProviderContextAnchor
     },
@@ -125,6 +136,7 @@ class DurableServerSession extends Session {
     title?: string
     todo?: string
     mode?: Mode
+    planReturnMode?: NonPlanMode
     contextUsage?: StoredContextUsage
     providerContextAnchor?: ProviderContextAnchor
     store: ServerTurnSessionStore
@@ -140,6 +152,7 @@ class DurableServerSession extends Session {
       input.revision,
       input.providerContextAnchor,
       input.mode,
+      input.planReturnMode,
     )
     this.#store = input.store
     this.#sessionId = input.sessionId
@@ -162,6 +175,9 @@ class DurableServerSession extends Session {
         ...(title ? { title } : {}),
         ...(this.getTodo() ? { todo: this.getTodo() } : {}),
         ...(this.getMode() ? { mode: this.getMode() } : {}),
+        ...(this.getPlanReturnMode()
+          ? { planReturnMode: this.getPlanReturnMode() }
+          : {}),
         ...(contextUsage ? { contextUsage: { ...contextUsage } } : {}),
         ...(providerContextAnchor
           ? { providerContextAnchor: { ...providerContextAnchor } }
@@ -198,6 +214,9 @@ export class ServerTurnRunner implements TurnRunner {
           ...(stored.title ? { title: stored.title } : {}),
           ...(stored.todo ? { todo: stored.todo } : {}),
           ...(stored.mode ? { mode: stored.mode } : {}),
+          ...(stored.planReturnMode
+            ? { planReturnMode: stored.planReturnMode }
+            : {}),
           ...(stored.contextUsage
             ? { contextUsage: stored.contextUsage }
             : {}),
@@ -220,6 +239,9 @@ export class ServerTurnRunner implements TurnRunner {
           ...(snapshot.title ? { title: snapshot.title } : {}),
           ...(snapshot.todo ? { todo: snapshot.todo } : {}),
           ...(snapshot.mode ? { mode: snapshot.mode } : {}),
+          ...(snapshot.planReturnMode
+            ? { planReturnMode: snapshot.planReturnMode }
+            : {}),
           ...(snapshot.contextUsage
             ? { contextUsage: snapshot.contextUsage }
             : {}),
@@ -250,6 +272,9 @@ export class ServerTurnRunner implements TurnRunner {
       ...(stored.title ? { title: stored.title } : {}),
       ...(stored.todo ? { todo: stored.todo } : {}),
       ...(stored.mode ? { mode: stored.mode } : {}),
+      ...(stored.planReturnMode
+        ? { planReturnMode: stored.planReturnMode }
+        : {}),
       ...(stored.contextUsage
         ? { contextUsage: stored.contextUsage }
         : {}),

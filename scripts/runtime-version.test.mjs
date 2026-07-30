@@ -75,6 +75,11 @@ test("build and installer surfaces target the pinned Node 24 runtime", async () 
   )
   assert.match(
     extensionInstaller,
+    /AppTranslocation/,
+    "installer must discover the currently running macOS-translocated VS Code app",
+  )
+  assert.match(
+    extensionInstaller,
     /\$\{HOME\}\/Downloads\/Visual Studio Code\.app/,
     "installer must support a downloaded VS Code app before it is moved to Applications",
   )

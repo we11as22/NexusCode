@@ -6,6 +6,7 @@ import {
   createNexusRunServices,
   hashWorkspaceIdentity,
   type Mode,
+  type NonPlanMode,
   type SessionMessage,
 } from "@nexuscode/core"
 
@@ -36,6 +37,7 @@ function createMemorySessionStore(
   store: ServerTurnSessionStore
   messages(sessionId: string): SessionMessage[]
   mode(sessionId: string): Mode | undefined
+  planReturnMode(sessionId: string): NonPlanMode | undefined
 } {
   const records = new Map(
     sessionIds.map((sessionId) => [
@@ -46,6 +48,7 @@ function createMemorySessionStore(
         title: undefined as string | undefined,
         todo: undefined as string | undefined,
         mode: undefined as Mode | undefined,
+        planReturnMode: undefined as NonPlanMode | undefined,
       },
     ]),
   )
@@ -58,6 +61,7 @@ function createMemorySessionStore(
       title: undefined as string | undefined,
       todo: undefined as string | undefined,
       mode: undefined as Mode | undefined,
+      planReturnMode: undefined as NonPlanMode | undefined,
     }
     records.set(sessionId, created)
     return created
@@ -79,6 +83,9 @@ function createMemorySessionStore(
           ...(current.title ? { title: current.title } : {}),
           ...(current.todo ? { todo: current.todo } : {}),
           ...(current.mode ? { mode: current.mode } : {}),
+          ...(current.planReturnMode
+            ? { planReturnMode: current.planReturnMode }
+            : {}),
         }
       },
       checkpoint: async (
@@ -101,12 +108,14 @@ function createMemorySessionStore(
         current.title = snapshot.title
         current.todo = snapshot.todo
         current.mode = snapshot.mode
+        current.planReturnMode = snapshot.planReturnMode
         current.revision += 1
         return current.revision
       },
     },
     messages: (sessionId) => record(sessionId).messages,
     mode: (sessionId) => record(sessionId).mode,
+    planReturnMode: (sessionId) => record(sessionId).planReturnMode,
   }
 }
 
@@ -272,6 +281,7 @@ describe("ServerTurnRunner", () => {
         }),
       ).resolves.toEqual({ status: "completed" })
       expect(sessionStore.mode("session-mode")).toBe("plan")
+      expect(sessionStore.planReturnMode("session-mode")).toBe("agent")
       state.prepareCommand({
         command: {
           version: 2,
@@ -335,7 +345,11 @@ describe("ServerTurnRunner", () => {
         sessionId: "session-1",
         inputId: "input-1",
         input: [
-          { type: "text", text: "inspect" },
+          {
+            type: "text",
+            text: "inspect with injected context",
+            user_message: "Inspect",
+          },
           { type: "image", mimeType: "image/png", data: "aA==" },
         ],
         mode: "agent",
@@ -354,7 +368,11 @@ describe("ServerTurnRunner", () => {
       expect(before).toHaveLength(1)
       expect(before[0]?.role).toBe("user")
       expect(before[0]?.content).toEqual([
-        { type: "text", text: "inspect" },
+        {
+          type: "text",
+          text: "inspect with injected context",
+          user_message: "Inspect",
+        },
         { type: "image", mimeType: "image/png", data: "aA==" },
       ])
       options.onEvent({

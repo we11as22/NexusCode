@@ -704,9 +704,10 @@ ${commandList}`,
         console.log('No checkpoints for this session.')
       } else {
         entries.forEach((e, i) => {
-          const shortHash = e.hash.slice(0, 7)
-          const desc = e.description ? ` ${e.description}` : ''
-          console.log(`${i + 1}. ${shortHash} (${new Date(e.ts).toISOString()})${desc}`)
+          const desc = e.description ? ` — ${e.description}` : ''
+          console.log(
+            `Checkpoint ${i + 1} · ${new Date(e.ts).toISOString()}${desc}`,
+          )
         })
       }
       process.exit(0)

@@ -497,6 +497,28 @@ html, body, #root {
   box-shadow: inset 0 0 0 1px var(--nexus-accent-muted);
 }
 
+.nexus-session-search {
+  position: relative;
+  display: block;
+  width: 100%;
+}
+
+.nexus-session-search-icon {
+  position: absolute;
+  left: 9px;
+  top: 50%;
+  z-index: 1;
+  color: var(--vscode-input-placeholderForeground);
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+
+.nexus-session-search-input {
+  width: 100%;
+  min-width: 0;
+  padding-left: 29px;
+}
+
 /* Horizontal session tab bar (scrollable tabs + new + dropdown) */
 .nexus-session-tab-bar {
   flex-shrink: 0;
@@ -1797,7 +1819,7 @@ html, body, #root {
   left: 0;
   right: 0;
   bottom: 0;
-  height: 68px;
+  height: 44px;
   background: linear-gradient(
     180deg,
     rgba(20, 20, 20, 0) 0%,
@@ -1836,23 +1858,21 @@ html, body, #root {
 }
 
 .nexus-plan-followup-text--collapsed {
-  max-height: min(28vh, 260px);
-  overflow: auto;
-  padding-bottom: 38px;
+  max-height: min(22vh, 190px);
+  overflow: hidden;
+  padding-bottom: 12px;
 }
 
 .nexus-plan-followup-expand-row {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 12px;
+  position: relative;
   display: flex;
   justify-content: center;
-  pointer-events: none;
+  padding: 8px 10px 10px;
+  border-top: 1px solid var(--vscode-panel-border);
+  background: color-mix(in srgb, var(--vscode-editor-background) 92%, #000 8%);
 }
 
 .nexus-plan-expand-btn {
-  pointer-events: auto;
   border: 1px solid var(--vscode-panel-border);
   background: color-mix(in srgb, var(--vscode-input-background) 92%, #000 8%);
   color: var(--vscode-foreground);
@@ -3572,6 +3592,23 @@ input[type="text"]:focus-visible {
   min-width: 0;
   max-width: 100%;
   overflow-x: hidden;
+}
+
+/* Keep the six primary settings destinations balanced at normal sidebar widths.
+   A deterministic 3 × 2 grid avoids the visually lopsided 5 + 1 flex wrap. */
+.nexus-settings-primary-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.nexus-settings-primary-tabs > button {
+  min-width: 0;
+  width: 100%;
+  justify-content: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 @media (prefers-reduced-motion: reduce) {

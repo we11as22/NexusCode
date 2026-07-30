@@ -250,6 +250,34 @@ describe("VsCodeHost dirty editor authority", () => {
     expect(vscodeState.disk.get(filePath)).toBe("agent result")
   })
 
+  it("compare-and-swaps an open buffer when the durable record knows its POSIX mode", async () => {
+    const workspace = makeWorkspace()
+    const filePath = path.join(workspace, "file.ts")
+    fs.writeFileSync(filePath, "PLAN_OK")
+    vscodeState.disk.set(filePath, "PLAN_OK")
+    const document = openDocument(filePath, "PLAN_OK")
+    const host = new VsCodeHost(workspace, () => {})
+    const expected = hashFileContent("PLAN_OK")
+
+    await host.applyFileMutation({
+      path: "file.ts",
+      expected: {
+        exists: true,
+        ...expected,
+        blob: expected.hash,
+        mode: 0o644,
+      },
+      next: {
+        exists: true,
+        content: Buffer.from("reverted"),
+        mode: 0o644,
+      },
+    })
+
+    expect(document.getText()).toBe("reverted")
+    expect(vscodeState.disk.get(filePath)).toBe("reverted")
+  })
+
   it("rejects a durable mutation after the editor buffer drifts", async () => {
     const workspace = makeWorkspace()
     const filePath = path.join(workspace, "file.ts")

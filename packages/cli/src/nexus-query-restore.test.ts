@@ -4,6 +4,31 @@ import type { SessionMessage } from "@nexuscode/core"
 import { replMessagesFromSession } from "./nexus-query.js"
 
 describe("replMessagesFromSession", () => {
+  it("restores the short user projection instead of an internal host prompt", () => {
+    const restored = replMessagesFromSession([
+      {
+        id: "user-plan-revision",
+        ts: 1,
+        role: "user",
+        content: [{
+          type: "text",
+          text: "Revise the current implementation plan based on this feedback. Internal details.",
+          user_message: "Revise plan → Keep the API backwards compatible",
+        }],
+        mode: "plan",
+      },
+    ])
+
+    expect(restored).toHaveLength(1)
+    expect(restored[0]).toMatchObject({
+      type: "user",
+      message: {
+        content: "Revise plan → Keep the API backwards compatible",
+      },
+    })
+    expect(JSON.stringify(restored)).not.toContain("Internal details")
+  })
+
   it("restores completed file tools with the same exact diff payload used live", () => {
     const messages: SessionMessage[] = [
       {

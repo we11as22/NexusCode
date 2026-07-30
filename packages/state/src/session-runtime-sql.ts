@@ -146,8 +146,24 @@ export function normalizeRuntimeParts(
       if (typeof part.text !== "string" || part.text.length === 0) {
         throw new Error("Text input parts must not be empty")
       }
+      if (
+        part.user_message !== undefined &&
+        (typeof part.user_message !== "string" ||
+          part.user_message.trim().length === 0 ||
+          part.user_message.length > 16_384)
+      ) {
+        throw new Error(
+          "Text input display projections must contain from 1 to 16384 characters",
+        )
+      }
       textCharacters += part.text.length
-      return Object.freeze({ type: "text", text: part.text })
+      return Object.freeze({
+        type: "text",
+        text: part.text,
+        ...(part.user_message
+          ? { user_message: part.user_message.trim() }
+          : {}),
+      })
     }
     if (part.type === "image") {
       if (

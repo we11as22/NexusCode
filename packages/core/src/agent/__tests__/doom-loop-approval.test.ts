@@ -137,4 +137,96 @@ describe("doom-loop approval coordination", () => {
     expect(host.approvals).toHaveLength(1)
     expect(executions).toBe(1)
   })
+
+  it("stops repeated successful calls when the host denies the loop", async () => {
+    const cwd = process.cwd()
+    const host = createFakeHost({
+      cwd,
+      async showApprovalDialog() {
+        return { approved: false }
+      },
+    })
+    const session = createFakeSession(cwd)
+    session.addMessage({ role: "user", content: "call the tool only once" })
+
+    let executions = 0
+    const tool: ToolDef = {
+      name: "IdempotentTool",
+      description: "updates an idempotent fake state",
+      parameters: z.object({ value: z.string() }),
+      async execute() {
+        executions += 1
+        return { success: true, output: "already up to date" }
+      },
+    }
+    let providerCalls = 0
+    const client = {
+      providerName: "test",
+      modelId: "test-model",
+      async *stream() {
+        providerCalls += 1
+        if (providerCalls <= 4) {
+          yield {
+            type: "tool_call" as const,
+            toolCallId: `repeat-${providerCalls}`,
+            toolName: "IdempotentTool",
+            toolInput: { value: "same" },
+          }
+          yield {
+            type: "finish" as const,
+            finishReason: "tool_calls" as const,
+          }
+          return
+        }
+        yield { type: "text_delta" as const, delta: "stopped" }
+        yield { type: "finish" as const, finishReason: "stop" as const }
+      },
+      supportsStructuredOutput: () => false,
+      getModel: () => ({}),
+    } as unknown as LLMClient
+
+    await runAgentLoop({
+      session,
+      executionIdentity: {
+        workspaceId: "test-workspace",
+        sessionId: session.id,
+        turnId: "test-turn-success-loop",
+        runId: "test-run-success-loop",
+      },
+      client,
+      host,
+      config: createTestConfig({
+        memory: { sessionMemoryEnabled: false },
+      }),
+      services: createNexusRunServices({
+        orchestrationRuntime: orchestrationRuntime as never,
+      }),
+      mode: "agent",
+      tools: [tool],
+      skills: [],
+      rulesContent: "",
+      compaction: createCompaction(),
+      signal: new AbortController().signal,
+    })
+
+    expect(executions).toBe(3)
+    expect(host.approvals).toHaveLength(1)
+    expect(host.events).toContainEqual({
+      type: "doom_loop_detected",
+      tool: "IdempotentTool",
+    })
+    expect(
+      session.messages
+        .flatMap((message) =>
+          Array.isArray(message.content) ? message.content : [],
+        )
+        .some(
+          (part) =>
+            part.type === "tool" &&
+            part.tool === "IdempotentTool" &&
+            part.status === "error" &&
+            part.output?.includes("Stop the loop"),
+        ),
+    ).toBe(true)
+  })
 })

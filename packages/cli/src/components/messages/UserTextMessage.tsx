@@ -7,27 +7,30 @@ import type { TextBlockParam } from '../../provider/message-schema.js'
 
 type Props = {
   addMargin: boolean
-  param: TextBlockParam
+  param: TextBlockParam & { user_message?: string }
 }
 
 export function UserTextMessage({ addMargin, param }: Props): React.ReactNode {
-  if (param.text.trim() === NO_CONTENT_MESSAGE) {
+  const displayText = param.user_message?.trim() || param.text
+  const displayParam =
+    displayText === param.text ? param : { ...param, text: displayText }
+  if (displayText.trim() === NO_CONTENT_MESSAGE) {
     return null
   }
 
   // Bash inputs!
-  if (param.text.includes('<bash-input>')) {
-    return <UserBashInputMessage addMargin={addMargin} param={param} />
+  if (displayText.includes('<bash-input>')) {
+    return <UserBashInputMessage addMargin={addMargin} param={displayParam} />
   }
 
   // Slash commands/
   if (
-    param.text.includes('<command-name>') ||
-    param.text.includes('<command-message>')
+    displayText.includes('<command-name>') ||
+    displayText.includes('<command-message>')
   ) {
-    return <UserCommandMessage addMargin={addMargin} param={param} />
+    return <UserCommandMessage addMargin={addMargin} param={displayParam} />
   }
 
   // User prompts>
-  return <UserPromptMessage addMargin={addMargin} param={param} />
+  return <UserPromptMessage addMargin={addMargin} param={displayParam} />
 }

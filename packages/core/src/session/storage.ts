@@ -84,6 +84,8 @@ export interface StoredSession {
   contextUsage?: StoredContextUsage
   providerContextAnchor?: ProviderContextAnchor
   mode?: Mode
+  /** Mode to restore when a pending plan is declined without implementation. */
+  planReturnMode?: Exclude<Mode, "plan">
   messages: SessionMessage[]
   /** Monotonic durable journal revision. Legacy v1 files load as revision 0. */
   revision?: number
@@ -96,6 +98,7 @@ export interface StoredSessionMeta {
   title?: string
   todo?: string
   mode?: Mode
+  planReturnMode?: Exclude<Mode, "plan">
   messageCount: number
   revision: number
 }
@@ -264,6 +267,12 @@ function isMode(value: unknown): value is Mode {
   )
 }
 
+function isPlanReturnMode(
+  value: unknown,
+): value is Exclude<Mode, "plan"> {
+  return isMode(value) && value !== "plan"
+}
+
 function normalizeStoredSession(
   value: Partial<StoredSession>,
   expectedId: string,
@@ -287,6 +296,9 @@ function normalizeStoredSession(
       ? { providerContextAnchor: value.providerContextAnchor }
       : {}),
     ...(isMode(value.mode) ? { mode: value.mode } : {}),
+    ...(isPlanReturnMode(value.planReturnMode)
+      ? { planReturnMode: value.planReturnMode }
+      : {}),
     messages: value.messages as SessionMessage[],
     revision,
   }
@@ -320,6 +332,9 @@ function createSnapshot(
       ? { providerContextAnchor: session.providerContextAnchor }
       : {}),
     ...(session.mode ? { mode: session.mode } : {}),
+    ...(session.planReturnMode
+      ? { planReturnMode: session.planReturnMode }
+      : {}),
     messages: session.messages,
   }
   return {
@@ -667,6 +682,7 @@ export class SessionStore {
     sessionId: string,
     cwd: string,
     mutate: (session: StoredSession) => StoredSession | Promise<StoredSession>,
+    options: SaveSessionOptions = {},
   ): Promise<StoredSession | null> {
     assertSafeSessionId(sessionId)
     const root = canonicalProjectRoot(cwd)
@@ -674,6 +690,17 @@ export class SessionStore {
     return withFileLock(journalPath, async () => {
       const current = await this.parseJournal(sessionId, root)
       if (!current.session) return null
+      const actualRevision = current.session.revision ?? 0
+      if (
+        options.expectedRevision !== undefined &&
+        options.expectedRevision !== actualRevision
+      ) {
+        throw new SessionConflictError(
+          sessionId,
+          options.expectedRevision,
+          actualRevision,
+        )
+      }
       const next = await mutate({
         ...current.session,
         messages: [...current.session.messages],
@@ -706,6 +733,7 @@ export class SessionStore {
       title: session.title,
       todo: session.todo,
       mode: session.mode,
+      planReturnMode: session.planReturnMode,
       messageCount: session.messages.length,
       revision: session.revision ?? 0,
     }
@@ -730,6 +758,7 @@ export class SessionStore {
         title: session.title,
         todo: session.todo,
         mode: session.mode,
+        planReturnMode: session.planReturnMode,
         messageCount: session.messages.length,
         revision: session.revision ?? 0,
       },
@@ -1092,8 +1121,9 @@ export async function mutateSession(
   sessionId: string,
   cwd: string,
   mutate: (session: StoredSession) => StoredSession | Promise<StoredSession>,
+  options: SaveSessionOptions = {},
 ): Promise<StoredSession | null> {
-  return defaultSessionStore.mutateSession(sessionId, cwd, mutate)
+  return defaultSessionStore.mutateSession(sessionId, cwd, mutate, options)
 }
 
 export async function loadSession(sessionId: string, cwd: string): Promise<StoredSession | null> {

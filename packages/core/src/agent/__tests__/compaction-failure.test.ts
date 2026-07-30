@@ -146,6 +146,103 @@ async function runWith(options: {
 }
 
 describe("agent compaction failure safety", () => {
+  it("compacts a 201-message active history even when token usage is small", async () => {
+    const session = createFakeSession()
+    for (let index = 0; index < 201; index += 1) {
+      session.addMessage({
+        role: index % 2 === 0 ? "user" : "assistant",
+        content: "x",
+      })
+    }
+    const compaction = compactionDouble({
+      result: {
+        status: "compacted",
+        summaryMessageId: "summary-message-limit",
+      },
+      overflowTrueCount: 0,
+      onCompact: () => {
+        session.addMessage({
+          role: "user",
+          content: "bounded summary",
+          summary: true,
+        })
+      },
+    })
+    const client = finalAnswerClient()
+
+    await runWith({
+      compaction: compaction.value,
+      client: client.value,
+      session,
+    })
+
+    expect(compaction.compact).toHaveBeenCalledTimes(1)
+    expect(client.stream).toHaveBeenCalledTimes(1)
+  })
+
+  it("honors auto=false below the active-message safety cap", async () => {
+    const session = createFakeSession()
+    for (let index = 0; index < 201; index += 1) {
+      session.addMessage({
+        role: index % 2 === 0 ? "user" : "assistant",
+        content: "x",
+      })
+    }
+    const compaction = compactionDouble({
+      result: {
+        status: "compacted",
+        summaryMessageId: "must-not-run",
+      },
+      overflowTrueCount: 0,
+    })
+    const client = finalAnswerClient()
+
+    await runWith({
+      compaction: compaction.value,
+      client: client.value,
+      session,
+      auto: false,
+    })
+
+    expect(compaction.compact).not.toHaveBeenCalled()
+    expect(client.stream).toHaveBeenCalledTimes(1)
+  })
+
+  it("enforces the 1000-message safety cap even when auto compaction is disabled", async () => {
+    const session = createFakeSession()
+    for (let index = 0; index < 1_001; index += 1) {
+      session.addMessage({
+        role: index % 2 === 0 ? "user" : "assistant",
+        content: "x",
+      })
+    }
+    const compaction = compactionDouble({
+      result: {
+        status: "compacted",
+        summaryMessageId: "summary-hard-message-limit",
+      },
+      overflowTrueCount: 0,
+      onCompact: () => {
+        session.addMessage({
+          role: "user",
+          content: "bounded hard-cap summary",
+          summary: true,
+        })
+      },
+    })
+    const client = finalAnswerClient()
+
+    await runWith({
+      compaction: compaction.value,
+      client: client.value,
+      session,
+      auto: false,
+    })
+
+    expect(compaction.compact).toHaveBeenCalledTimes(1)
+    expect(client.stream).toHaveBeenCalledTimes(1)
+  })
+
   it("persists and emits one turn duration on completion", async () => {
     const compaction = compactionDouble({
       result: { status: "skipped", reason: "no_new_messages" },

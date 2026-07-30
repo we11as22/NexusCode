@@ -19,6 +19,13 @@ function describeRequest(request: PendingProjectAuthorityRequest): string {
   return compact.length <= 180 ? compact : `${compact.slice(0, 179)}…`
 }
 
+/** Exact identity stays internal; the operator navigates human request rows. */
+export function formatAuthorityRequestLabel(
+  request: { readonly kind: string },
+): string {
+  return request.kind
+}
+
 export function NexusAuthorityPanel({
   cwd,
   initialRequests,
@@ -82,7 +89,7 @@ export function NexusAuthorityPanel({
       <Text bold color={theme.primary}>Project authority requests</Text>
       <Text dimColor>
         Repository endpoints, executables, and external paths stay inactive
-        until this host approves their exact fingerprint.
+        until this host approves the exact normalized request.
       </Text>
       <Box flexDirection="column" marginTop={1}>
         {rows.length === 0 ? (
@@ -91,7 +98,7 @@ export function NexusAuthorityPanel({
           <Box key={request.fingerprint} flexDirection="column" marginBottom={1}>
             <Text color={index === selectedIndex ? theme.primary : undefined}>
               {index === selectedIndex ? figures.pointer : " "}{" "}
-              {request.kind} · {request.fingerprint.slice(0, 12)}
+              {formatAuthorityRequestLabel(request)}
             </Text>
             <Text dimColor>  {detail}</Text>
           </Box>

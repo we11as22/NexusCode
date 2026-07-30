@@ -135,33 +135,40 @@ function inputForDoomSignature(input: Record<string, unknown>): Record<string, u
  */
 function collectTerminalToolParts(
   session: ISession,
-  toolName: string,
-): Array<{ input: Record<string, unknown>; status: string }> {
-  const out: Array<{ input: Record<string, unknown>; status: string }> = []
+): Array<{ tool: string; input: Record<string, unknown>; status: string }> {
+  const out: Array<{
+    tool: string
+    input: Record<string, unknown>
+    status: string
+  }> = []
   for (const m of getMessagesForActiveContext(session.messages)) {
     if (!Array.isArray(m.content)) continue
     for (const p of m.content as Array<{ type: string; tool?: string; input?: unknown; status?: string }>) {
-      if (p.type !== "tool" || p.tool !== toolName) continue
+      if (p.type !== "tool" || !p.tool) continue
       const st = p.status
       if (st !== "completed" && st !== "error") continue
       const input = p.input && typeof p.input === "object" ? (p.input as Record<string, unknown>) : {}
-      out.push({ input, status: st })
+      out.push({ tool: p.tool, input, status: st })
     }
   }
   return out
 }
 
 /**
- * Doom loop: block only **repeated identical failures** (true infinite retry loops).
+ * Doom loop: require an explicit host decision after repeated identical calls.
  *
  * Rules (all tools, including MCP, Write, Bash, TodoWrite, Parallel, …):
  * 1. Ignore `pending` parts (the in-flight call is not counted).
  * 2. Only look at messages in **active context** (after the latest compaction summary), not ancient session history.
  * 3. Compare arguments with noise keys stripped (`task_progress`, `reason`).
- * 4. Take the longest suffix of this tool with the same signature as the current call; doom iff length ≥ threshold and **every** part in the suffix is `error`.
+ * 4. Require a consecutive suffix of the entire tool stream. Intervening tools
+ *    are progress and break the repeat chain.
+ * 5. Count both success and failure. Repeating an idempotent success can burn
+ *    context forever just as easily as retrying an error; the approval channel
+ *    still lets an interactive user continue intentionally.
  *
- * Any successful (`completed`) call in that suffix breaks the chain — safe for Read-after-Write, retries after transient errors,
- * repeated TodoWrite / MCP reads with the same payload, etc. Pure "success spam" is not blocked here by design.
+ * This follows Kilo/OpenCode's status-independent repeated-call guard and
+ * Kimi's "same call made no progress" recovery principle.
  */
 export async function detectDoomLoop(
   session: ISession,
@@ -172,16 +179,16 @@ export async function detectDoomLoop(
   const currentSig = getDoomLoopSignature(toolName, toolInput)
   if (toolName === "Bash" && currentSig === "") return false
 
-  const terminal = collectTerminalToolParts(session, toolName)
-  const suffix: Array<{ input: Record<string, unknown>; status: string }> = []
+  const terminal = collectTerminalToolParts(session)
+  let suffixLength = 0
   for (let i = terminal.length - 1; i >= 0; i--) {
     const p = terminal[i]!
+    if (p.tool !== toolName) break
     if (getDoomLoopSignature(toolName, p.input) !== currentSig) break
-    suffix.push(p)
+    suffixLength += 1
   }
 
-  if (suffix.length < threshold) return false
-  return suffix.every(p => p.status === "error")
+  return suffixLength >= threshold
 }
 
 export function getDoomLoopSignature(toolName: string, input: Record<string, unknown>): string {
@@ -193,9 +200,21 @@ export function getDoomLoopSignature(toolName: string, input: Record<string, unk
   return canonicalJsonForDoomLoop(cleaned)
 }
 
-function canonicalJsonForDoomLoop(obj: Record<string, unknown>): string {
-  const keys = Object.keys(obj).sort()
-  return JSON.stringify(obj, keys as unknown as string[])
+function canonicalJsonForDoomLoop(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value) ?? "null"
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJsonForDoomLoop).join(",")}]`
+  }
+  const object = value as Record<string, unknown>
+  return `{${Object.keys(object)
+    .sort()
+    .map(
+      (key) =>
+        `${JSON.stringify(key)}:${canonicalJsonForDoomLoop(object[key])}`,
+    )
+    .join(",")}}`
 }
 
 /** Ensure optional string-array param is undefined or an array of strings (gateway may send [undefined] or mixed). */

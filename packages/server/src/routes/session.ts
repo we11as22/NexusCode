@@ -75,6 +75,8 @@ sessionRoutes.post("/", async (c) => {
     messageCount: meta.messageCount,
     revision: meta.revision,
     mode: meta.mode,
+    planReturnMode: meta.planReturnMode,
+    todo: meta.todo,
   })
 })
 
@@ -91,6 +93,8 @@ sessionRoutes.get("/:id", async (c) => {
     messageCount: session.messageCount,
     revision: session.revision,
     mode: session.mode,
+    planReturnMode: session.planReturnMode,
+    todo: session.todo,
   })
 })
 
@@ -101,7 +105,10 @@ sessionRoutes.patch("/:id/mode", async (c) => {
   if (activeRun && !activeRun.done) {
     return c.json({ error: "Session has an active run" }, 409)
   }
-  const body = (await c.req.json().catch(() => ({}))) as { mode?: Mode }
+  const body = (await c.req.json().catch(() => ({}))) as {
+    mode?: Mode
+    todo?: unknown
+  }
   const mode = body.mode
   if (
     mode !== "agent" &&
@@ -112,10 +119,22 @@ sessionRoutes.patch("/:id/mode", async (c) => {
   ) {
     return c.json({ error: "Invalid mode" }, 400)
   }
+  if (
+    body.todo !== undefined &&
+    (typeof body.todo !== "string" || body.todo.length > 100_000)
+  ) {
+    return c.json({ error: "Invalid todo" }, 400)
+  }
   const session = await fsGetSession(id, cwd)
   if (!session) return c.json({ error: "Session not found" }, 404)
-  await fsUpdateSessionMode(id, cwd, mode)
-  return c.json({ ok: true, mode })
+  await fsUpdateSessionMode(id, cwd, mode, body.todo)
+  const updated = await fsGetSession(id, cwd)
+  return c.json({
+    ok: true,
+    mode,
+    planReturnMode: updated?.planReturnMode,
+    revision: updated?.revision,
+  })
 })
 
 // GET /session/:id/message — paginated messages

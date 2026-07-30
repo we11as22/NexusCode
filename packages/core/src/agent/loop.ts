@@ -55,6 +55,7 @@ import type {
   CompactionResult,
   SessionCompaction,
 } from "../session/compaction.js"
+import { getActiveMessageCompactionPressure } from "../session/compaction.js"
 import { planExitWriteGateSatisfied } from "../session/plan-write-gate.js"
 import {
   formatConversationSummaryForModel,
@@ -1251,7 +1252,12 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     // same threshold as the UI — session-only estimates were too low and caused API 400s.
     const sumTh = config.summarization?.threshold ?? 0.8
     const limitCtx = getContextWindowLimit(activeClient.modelId, config.model.contextWindow)
-    if (config.summarization?.auto !== false && limitCtx > 0) {
+    const autoCompactionEnabled = config.summarization?.auto !== false
+    const messagePressure = getActiveMessageCompactionPressure(session.messages)
+    if (
+      autoCompactionEnabled ||
+      messagePressure === "hard"
+    ) {
       const roll = computeContextUsageMetrics({
         sessionMessages: session.messages,
         systemPromptText: systemPrompt,
@@ -1260,7 +1266,14 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
         configuredContextWindow: config.model.contextWindow,
         providerAnchor: session.getProviderContextAnchor(),
       })
-      if (compaction.isOverflow(roll.usedTokens, limitCtx, sumTh)) {
+      const tokenPressure =
+        autoCompactionEnabled &&
+        limitCtx > 0 &&
+        compaction.isOverflow(roll.usedTokens, limitCtx, sumTh)
+      const shouldCompactForMessages =
+        messagePressure === "hard" ||
+        (autoCompactionEnabled && messagePressure === "soft")
+      if (tokenPressure || shouldCompactForMessages) {
         compaction.prune(session)
         const roll2 = computeContextUsageMetrics({
           sessionMessages: session.messages,
@@ -1270,7 +1283,22 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
           configuredContextWindow: config.model.contextWindow,
           providerAnchor: session.getProviderContextAnchor(),
         })
-        if (compaction.isOverflow(roll2.usedTokens, limitCtx, sumTh)) {
+        const tokenPressureAfterPrune =
+          autoCompactionEnabled &&
+          limitCtx > 0 &&
+          compaction.isOverflow(roll2.usedTokens, limitCtx, sumTh)
+        const messagePressureAfterPrune =
+          getActiveMessageCompactionPressure(session.messages)
+        const shouldCompactForMessagesAfterPrune =
+          messagePressureAfterPrune === "hard" ||
+          (
+            autoCompactionEnabled &&
+            messagePressureAfterPrune === "soft"
+          )
+        if (
+          tokenPressureAfterPrune ||
+          shouldCompactForMessagesAfterPrune
+        ) {
           if (compactedSinceLastProviderSuccess) {
             terminalError = new Error(
               "Context remains above the automatic compaction threshold after a successful compaction. " +
@@ -1291,7 +1319,10 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             compaction,
             signal,
             {
-              trigger: "automatic",
+              trigger:
+                messagePressureAfterPrune === "hard"
+                  ? "safety_limit"
+                  : "automatic",
               forceSummary: true,
               fatalOnFailure: true,
               systemPromptText: systemPrompt,
@@ -2472,11 +2503,6 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     await recordPluginHookOutputs(session, host, "turn-complete-hook", turnCompleteHookResults, {
       mode,
     })
-    // When mandatory end tool was executed, clear todo so it's removed from session.
-    if (attemptedCompletionThisIteration) {
-      session.updateTodo("")
-      host.emit({ type: "todo_updated", todo: "" })
-    }
     const durationMs = Math.max(0, Date.now() - turnStartedAt)
     session.updateMessage(lastAssistantMessageId, { durationMs })
     await session.save()
@@ -2561,7 +2587,7 @@ function parseLooseValue(value: string): unknown {
 
 
 type HandleCompactionOpts = {
-  trigger: "manual" | "automatic" | "context_overflow"
+  trigger: "manual" | "automatic" | "context_overflow" | "safety_limit"
   /** Manual and overflow recovery must summarize even below the proactive threshold. */
   forceSummary: boolean
   /** Whether a failed lifecycle should be surfaced as a fatal run error. */
@@ -2603,6 +2629,7 @@ async function runCompactionLifecycle(
 ): Promise<CompactionExecutionResult> {
   if (
     opts.trigger !== "manual" &&
+    opts.trigger !== "safety_limit" &&
     config.summarization?.auto === false
   ) {
     return { status: "skipped", reason: "auto_disabled" }

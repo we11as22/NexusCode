@@ -48,6 +48,11 @@ export const UserInputPartSchema = z.discriminatedUnion("type", [
     .object({
       type: z.literal("text"),
       text: z.string().min(1).max(MAX_USER_INPUT_TEXT_CHARS),
+      /**
+       * Optional bounded UI projection. The runtime persists it with the
+       * transcript but sends only `text` to the provider.
+       */
+      user_message: z.string().trim().min(1).max(16_384).optional(),
     })
     .strict(),
   z

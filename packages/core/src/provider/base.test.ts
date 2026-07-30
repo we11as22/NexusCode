@@ -138,6 +138,67 @@ describe("BaseLLMClient stream retry boundary", () => {
       { type: "text_delta", delta: "NEXUS_OK" },
     ])
   })
+
+  it("preserves native tool-result roles instead of disguising them as user text", async () => {
+    streamTextMock.mockImplementationOnce(() =>
+      streamResult([
+        { type: "finish", finishReason: "stop" },
+      ]),
+    )
+
+    for await (const _event of createClient().stream({
+      ...streamOptions,
+      messages: [
+        { role: "user", content: "update once" },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: "call-1",
+              toolName: "TodoWrite",
+              args: { todos: [] },
+            },
+          ],
+        },
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "call-1",
+              toolName: "TodoWrite",
+              result: "Todo list updated.",
+            },
+          ],
+        },
+      ],
+    })) {
+      // Drain the stream so the provider invocation is observable.
+    }
+
+    const call = streamTextMock.mock.calls[0]?.[0] as {
+      messages?: Array<{ role: string; content: unknown }>
+    }
+    expect(call.messages).toContainEqual({
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          toolCallId: "call-1",
+          toolName: "TodoWrite",
+          result: "Todo list updated.",
+          isError: false,
+        },
+      ],
+    })
+    expect(call.messages).not.toContainEqual(
+      expect.objectContaining({
+        role: "user",
+        content: expect.stringContaining("TOOL_RESULT"),
+      }),
+    )
+  })
 })
 
 describe("normalizeLLMUsage", () => {

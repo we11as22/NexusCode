@@ -316,6 +316,8 @@ interface StoredSession {
     contextUsage?: StoredContextUsage;
     providerContextAnchor?: ProviderContextAnchor;
     mode?: Mode;
+    /** Mode to restore when a pending plan is declined without implementation. */
+    planReturnMode?: Exclude<Mode, "plan">;
     messages: SessionMessage[];
     /** Monotonic durable journal revision. Legacy v1 files load as revision 0. */
     revision?: number;
@@ -327,6 +329,7 @@ interface StoredSessionMeta {
     title?: string;
     todo?: string;
     mode?: Mode;
+    planReturnMode?: Exclude<Mode, "plan">;
     messageCount: number;
     revision: number;
 }
@@ -391,7 +394,7 @@ declare class SessionStore {
     private quarantineTail;
     private writeLocked;
     saveSession(session: StoredSession, options?: SaveSessionOptions): Promise<number>;
-    mutateSession(sessionId: string, cwd: string, mutate: (session: StoredSession) => StoredSession | Promise<StoredSession>): Promise<StoredSession | null>;
+    mutateSession(sessionId: string, cwd: string, mutate: (session: StoredSession) => StoredSession | Promise<StoredSession>, options?: SaveSessionOptions): Promise<StoredSession | null>;
     loadSession(sessionId: string, cwd: string): Promise<StoredSession | null>;
     getSessionMeta(sessionId: string, cwd: string): Promise<StoredSessionMeta | null>;
     loadSessionMessages(sessionId: string, cwd: string, limit: number, offset: number): Promise<{
@@ -410,7 +413,7 @@ declare class SessionStore {
 }
 declare function getSessionStorageDiagnostics(): readonly SessionStorageDiagnostic[];
 declare function saveSession(session: StoredSession, options?: SaveSessionOptions): Promise<number>;
-declare function mutateSession(sessionId: string, cwd: string, mutate: (session: StoredSession) => StoredSession | Promise<StoredSession>): Promise<StoredSession | null>;
+declare function mutateSession(sessionId: string, cwd: string, mutate: (session: StoredSession) => StoredSession | Promise<StoredSession>, options?: SaveSessionOptions): Promise<StoredSession | null>;
 declare function loadSession(sessionId: string, cwd: string): Promise<StoredSession | null>;
 declare function getSessionMeta(sessionId: string, cwd: string): Promise<StoredSessionMeta | null>;
 declare function loadSessionMessages(sessionId: string, cwd: string, limit: number, offset: number): Promise<{
@@ -426,6 +429,18 @@ declare function listSessions(cwd: string): Promise<Array<{
 }>>;
 declare function deleteSession(sessionId: string, cwd: string, options?: DeleteSessionOptions): Promise<boolean>;
 declare function generateSessionId(): string;
+
+type NonPlanMode = Exclude<Mode, "plan">;
+interface SessionModeState {
+    readonly mode: Mode;
+    readonly planReturnMode?: NonPlanMode;
+}
+/**
+ * Durable Plan-mode transition shared by the local and server runtimes.
+ * Revisions stay in Plan and preserve the original return mode; an explicit
+ * exit clears that pending return target.
+ */
+declare function transitionSessionMode(currentMode: Mode | undefined, currentPlanReturnMode: NonPlanMode | undefined, nextMode: Mode): SessionModeState;
 
 interface SessionRecoverySnapshot {
     readonly messages: readonly SessionMessage[];
@@ -455,10 +470,15 @@ declare class Session implements ISession {
     private _mode;
     /** Last verified durable journal revision used for optimistic concurrency. */
     private _revision;
-    constructor(id: string, cwd: string, messages?: SessionMessage[], initialTodo?: string, ephemeral?: boolean, contextUsageSnapshot?: StoredContextUsage | null, revision?: number, providerContextAnchor?: ProviderContextAnchor | null, mode?: Mode | null);
+    /** Non-plan mode restored when a pending plan is declined. */
+    private _planReturnMode;
+    constructor(id: string, cwd: string, messages?: SessionMessage[], initialTodo?: string, ephemeral?: boolean, contextUsageSnapshot?: StoredContextUsage | null, revision?: number, providerContextAnchor?: ProviderContextAnchor | null, mode?: Mode | null, planReturnMode?: Exclude<Mode, "plan"> | null);
     get messages(): SessionMessage[];
     getMode(): Mode | undefined;
     setMode(mode: Mode): void;
+    getPlanReturnMode(): Exclude<Mode, "plan"> | undefined;
+    getDurableRevision(): number;
+    acknowledgeDurableRevision(revision: number): void;
     invalidateTokenEstimate(): void;
     private clearContextUsageSnapshot;
     addMessage(msg: Omit<SessionMessage, "id" | "ts">, identity?: {
@@ -2301,6 +2321,8 @@ interface ISession {
     getMode(): Mode | undefined;
     /** Persistable execution mode selected by the host or admitted user turn. */
     setMode(mode: Mode): void;
+    /** Durable mode captured immediately before entering Plan. */
+    getPlanReturnMode?(): Exclude<Mode, "plan"> | undefined;
     addMessage(msg: Omit<SessionMessage, "id" | "ts">, identity?: {
         id?: string;
         ts?: number;
@@ -6092,6 +6114,13 @@ declare function createEmbeddingClient(config: EmbeddingConfig): EmbeddingClient
 declare function createLLMClient(config: ProviderConfig): LLMClient;
 
 /**
+ * Turn an approved plan into immediate, visible execution state. OpenClaude
+ * tells the model to create todos after approval; Nexus also materializes the
+ * deterministic first checklist so reloads and provider failures cannot lose
+ * the user's approved work.
+ */
+declare function approvedPlanTodo(planText: string): string;
+/**
  * Kilocode-style: detect if the last assistant message completed plan_exit,
  * so the host can show "Ready to implement?" (New session / Continue here).
  */
@@ -6163,12 +6192,19 @@ declare const MAX_IMAGES_PER_INPUT = 8;
 declare const UserInputPartSchema: z.ZodDiscriminatedUnion<"type", [z.ZodObject<{
     type: z.ZodLiteral<"text">;
     text: z.ZodString;
+    /**
+     * Optional bounded UI projection. The runtime persists it with the
+     * transcript but sends only `text` to the provider.
+     */
+    user_message: z.ZodOptional<z.ZodString>;
 }, "strict", z.ZodTypeAny, {
     type: "text";
     text: string;
+    user_message?: string | undefined;
 }, {
     type: "text";
     text: string;
+    user_message?: string | undefined;
 }>, z.ZodObject<{
     type: z.ZodLiteral<"image">;
     mimeType: z.ZodEnum<["image/png", "image/jpeg", "image/gif", "image/webp"]>;
@@ -6245,12 +6281,19 @@ declare const StartTurnCommandSchema: z.ZodObject<{
     input: z.ZodEffects<z.ZodArray<z.ZodDiscriminatedUnion<"type", [z.ZodObject<{
         type: z.ZodLiteral<"text">;
         text: z.ZodString;
+        /**
+         * Optional bounded UI projection. The runtime persists it with the
+         * transcript but sends only `text` to the provider.
+         */
+        user_message: z.ZodOptional<z.ZodString>;
     }, "strict", z.ZodTypeAny, {
         type: "text";
         text: string;
+        user_message?: string | undefined;
     }, {
         type: "text";
         text: string;
+        user_message?: string | undefined;
     }>, z.ZodObject<{
         type: z.ZodLiteral<"image">;
         mimeType: z.ZodEnum<["image/png", "image/jpeg", "image/gif", "image/webp"]>;
@@ -6287,6 +6330,7 @@ declare const StartTurnCommandSchema: z.ZodObject<{
     }>]>, "many">, ({
         type: "text";
         text: string;
+        user_message?: string | undefined;
     } | {
         data: string;
         type: "image";
@@ -6301,6 +6345,7 @@ declare const StartTurnCommandSchema: z.ZodObject<{
     })[], ({
         type: "text";
         text: string;
+        user_message?: string | undefined;
     } | {
         data: string;
         type: "image";
@@ -6332,6 +6377,7 @@ declare const StartTurnCommandSchema: z.ZodObject<{
     input: ({
         type: "text";
         text: string;
+        user_message?: string | undefined;
     } | {
         data: string;
         type: "image";
@@ -6358,6 +6404,7 @@ declare const StartTurnCommandSchema: z.ZodObject<{
     input: ({
         type: "text";
         text: string;
+        user_message?: string | undefined;
     } | {
         data: string;
         type: "image";
@@ -6386,12 +6433,19 @@ declare const QueueTurnCommandSchema: z.ZodObject<{
     input: z.ZodEffects<z.ZodArray<z.ZodDiscriminatedUnion<"type", [z.ZodObject<{
         type: z.ZodLiteral<"text">;
         text: z.ZodString;
+        /**
+         * Optional bounded UI projection. The runtime persists it with the
+         * transcript but sends only `text` to the provider.
+         */
+        user_message: z.ZodOptional<z.ZodString>;
     }, "strict", z.ZodTypeAny, {
         type: "text";
         text: string;
+        user_message?: string | undefined;
     }, {
         type: "text";
         text: string;
+        user_message?: string | undefined;
     }>, z.ZodObject<{
         type: z.ZodLiteral<"image">;
         mimeType: z.ZodEnum<["image/png", "image/jpeg", "image/gif", "image/webp"]>;
@@ -6428,6 +6482,7 @@ declare const QueueTurnCommandSchema: z.ZodObject<{
     }>]>, "many">, ({
         type: "text";
         text: string;
+        user_message?: string | undefined;
     } | {
         data: string;
         type: "image";
@@ -6442,6 +6497,7 @@ declare const QueueTurnCommandSchema: z.ZodObject<{
     })[], ({
         type: "text";
         text: string;
+        user_message?: string | undefined;
     } | {
         data: string;
         type: "image";
@@ -6473,6 +6529,7 @@ declare const QueueTurnCommandSchema: z.ZodObject<{
     input: ({
         type: "text";
         text: string;
+        user_message?: string | undefined;
     } | {
         data: string;
         type: "image";
@@ -6499,6 +6556,7 @@ declare const QueueTurnCommandSchema: z.ZodObject<{
     input: ({
         type: "text";
         text: string;
+        user_message?: string | undefined;
     } | {
         data: string;
         type: "image";
@@ -6528,12 +6586,19 @@ declare const SteerTurnCommandSchema: z.ZodObject<{
     input: z.ZodEffects<z.ZodArray<z.ZodDiscriminatedUnion<"type", [z.ZodObject<{
         type: z.ZodLiteral<"text">;
         text: z.ZodString;
+        /**
+         * Optional bounded UI projection. The runtime persists it with the
+         * transcript but sends only `text` to the provider.
+         */
+        user_message: z.ZodOptional<z.ZodString>;
     }, "strict", z.ZodTypeAny, {
         type: "text";
         text: string;
+        user_message?: string | undefined;
     }, {
         type: "text";
         text: string;
+        user_message?: string | undefined;
     }>, z.ZodObject<{
         type: z.ZodLiteral<"image">;
         mimeType: z.ZodEnum<["image/png", "image/jpeg", "image/gif", "image/webp"]>;
@@ -6570,6 +6635,7 @@ declare const SteerTurnCommandSchema: z.ZodObject<{
     }>]>, "many">, ({
         type: "text";
         text: string;
+        user_message?: string | undefined;
     } | {
         data: string;
         type: "image";
@@ -6584,6 +6650,7 @@ declare const SteerTurnCommandSchema: z.ZodObject<{
     })[], ({
         type: "text";
         text: string;
+        user_message?: string | undefined;
     } | {
         data: string;
         type: "image";
@@ -6604,6 +6671,7 @@ declare const SteerTurnCommandSchema: z.ZodObject<{
     input: ({
         type: "text";
         text: string;
+        user_message?: string | undefined;
     } | {
         data: string;
         type: "image";
@@ -6626,6 +6694,7 @@ declare const SteerTurnCommandSchema: z.ZodObject<{
     input: ({
         type: "text";
         text: string;
+        user_message?: string | undefined;
     } | {
         data: string;
         type: "image";
@@ -6697,12 +6766,19 @@ declare const SessionCommandSchema: z.ZodDiscriminatedUnion<"type", [z.ZodObject
     input: z.ZodEffects<z.ZodArray<z.ZodDiscriminatedUnion<"type", [z.ZodObject<{
         type: z.ZodLiteral<"text">;
         text: z.ZodString;
+        /**
+         * Optional bounded UI projection. The runtime persists it with the
+         * transcript but sends only `text` to the provider.
+         */
+        user_message: z.ZodOptional<z.ZodString>;
     }, "strict", z.ZodTypeAny, {
         type: "text";
         text: string;
+        user_message?: string | undefined;
     }, {
         type: "text";
         text: string;
+        user_message?: string | undefined;
     }>, z.ZodObject<{
         type: z.ZodLiteral<"image">;
         mimeType: z.ZodEnum<["image/png", "image/jpeg", "image/gif", "image/webp"]>;
@@ -6739,6 +6815,7 @@ declare const SessionCommandSchema: z.ZodDiscriminatedUnion<"type", [z.ZodObject
     }>]>, "many">, ({
         type: "text";
         text: string;
+        user_message?: string | undefined;
     } | {
         data: string;
         type: "image";
@@ -6753,6 +6830,7 @@ declare const SessionCommandSchema: z.ZodDiscriminatedUnion<"type", [z.ZodObject
     })[], ({
         type: "text";
         text: string;
+        user_message?: string | undefined;
     } | {
         data: string;
         type: "image";
@@ -6784,6 +6862,7 @@ declare const SessionCommandSchema: z.ZodDiscriminatedUnion<"type", [z.ZodObject
     input: ({
         type: "text";
         text: string;
+        user_message?: string | undefined;
     } | {
         data: string;
         type: "image";
@@ -6810,6 +6889,7 @@ declare const SessionCommandSchema: z.ZodDiscriminatedUnion<"type", [z.ZodObject
     input: ({
         type: "text";
         text: string;
+        user_message?: string | undefined;
     } | {
         data: string;
         type: "image";
@@ -6837,12 +6917,19 @@ declare const SessionCommandSchema: z.ZodDiscriminatedUnion<"type", [z.ZodObject
     input: z.ZodEffects<z.ZodArray<z.ZodDiscriminatedUnion<"type", [z.ZodObject<{
         type: z.ZodLiteral<"text">;
         text: z.ZodString;
+        /**
+         * Optional bounded UI projection. The runtime persists it with the
+         * transcript but sends only `text` to the provider.
+         */
+        user_message: z.ZodOptional<z.ZodString>;
     }, "strict", z.ZodTypeAny, {
         type: "text";
         text: string;
+        user_message?: string | undefined;
     }, {
         type: "text";
         text: string;
+        user_message?: string | undefined;
     }>, z.ZodObject<{
         type: z.ZodLiteral<"image">;
         mimeType: z.ZodEnum<["image/png", "image/jpeg", "image/gif", "image/webp"]>;
@@ -6879,6 +6966,7 @@ declare const SessionCommandSchema: z.ZodDiscriminatedUnion<"type", [z.ZodObject
     }>]>, "many">, ({
         type: "text";
         text: string;
+        user_message?: string | undefined;
     } | {
         data: string;
         type: "image";
@@ -6893,6 +6981,7 @@ declare const SessionCommandSchema: z.ZodDiscriminatedUnion<"type", [z.ZodObject
     })[], ({
         type: "text";
         text: string;
+        user_message?: string | undefined;
     } | {
         data: string;
         type: "image";
@@ -6924,6 +7013,7 @@ declare const SessionCommandSchema: z.ZodDiscriminatedUnion<"type", [z.ZodObject
     input: ({
         type: "text";
         text: string;
+        user_message?: string | undefined;
     } | {
         data: string;
         type: "image";
@@ -6950,6 +7040,7 @@ declare const SessionCommandSchema: z.ZodDiscriminatedUnion<"type", [z.ZodObject
     input: ({
         type: "text";
         text: string;
+        user_message?: string | undefined;
     } | {
         data: string;
         type: "image";
@@ -6978,12 +7069,19 @@ declare const SessionCommandSchema: z.ZodDiscriminatedUnion<"type", [z.ZodObject
     input: z.ZodEffects<z.ZodArray<z.ZodDiscriminatedUnion<"type", [z.ZodObject<{
         type: z.ZodLiteral<"text">;
         text: z.ZodString;
+        /**
+         * Optional bounded UI projection. The runtime persists it with the
+         * transcript but sends only `text` to the provider.
+         */
+        user_message: z.ZodOptional<z.ZodString>;
     }, "strict", z.ZodTypeAny, {
         type: "text";
         text: string;
+        user_message?: string | undefined;
     }, {
         type: "text";
         text: string;
+        user_message?: string | undefined;
     }>, z.ZodObject<{
         type: z.ZodLiteral<"image">;
         mimeType: z.ZodEnum<["image/png", "image/jpeg", "image/gif", "image/webp"]>;
@@ -7020,6 +7118,7 @@ declare const SessionCommandSchema: z.ZodDiscriminatedUnion<"type", [z.ZodObject
     }>]>, "many">, ({
         type: "text";
         text: string;
+        user_message?: string | undefined;
     } | {
         data: string;
         type: "image";
@@ -7034,6 +7133,7 @@ declare const SessionCommandSchema: z.ZodDiscriminatedUnion<"type", [z.ZodObject
     })[], ({
         type: "text";
         text: string;
+        user_message?: string | undefined;
     } | {
         data: string;
         type: "image";
@@ -7054,6 +7154,7 @@ declare const SessionCommandSchema: z.ZodDiscriminatedUnion<"type", [z.ZodObject
     input: ({
         type: "text";
         text: string;
+        user_message?: string | undefined;
     } | {
         data: string;
         type: "image";
@@ -7076,6 +7177,7 @@ declare const SessionCommandSchema: z.ZodDiscriminatedUnion<"type", [z.ZodObject
     input: ({
         type: "text";
         text: string;
+        user_message?: string | undefined;
     } | {
         data: string;
         type: "image";
@@ -13364,12 +13466,15 @@ declare const RemotePreparedTurnRecordSchema: z.ZodEffects<z.ZodObject<{
     input: z.ZodArray<z.ZodDiscriminatedUnion<"type", [z.ZodObject<{
         type: z.ZodLiteral<"text">;
         text: z.ZodString;
+        user_message: z.ZodOptional<z.ZodString>;
     }, "strict", z.ZodTypeAny, {
         type: "text";
         text: string;
+        user_message?: string | undefined;
     }, {
         type: "text";
         text: string;
+        user_message?: string | undefined;
     }>, z.ZodObject<{
         type: z.ZodLiteral<"image">;
         mimeType: z.ZodEnum<["image/png", "image/jpeg", "image/gif", "image/webp"]>;
@@ -13419,6 +13524,7 @@ declare const RemotePreparedTurnRecordSchema: z.ZodEffects<z.ZodObject<{
     input: ({
         type: "text";
         text: string;
+        user_message?: string | undefined;
     } | {
         data: string;
         type: "image";
@@ -13445,6 +13551,7 @@ declare const RemotePreparedTurnRecordSchema: z.ZodEffects<z.ZodObject<{
     input: ({
         type: "text";
         text: string;
+        user_message?: string | undefined;
     } | {
         data: string;
         type: "image";
@@ -13471,6 +13578,7 @@ declare const RemotePreparedTurnRecordSchema: z.ZodEffects<z.ZodObject<{
     input: ({
         type: "text";
         text: string;
+        user_message?: string | undefined;
     } | {
         data: string;
         type: "image";
@@ -13497,6 +13605,7 @@ declare const RemotePreparedTurnRecordSchema: z.ZodEffects<z.ZodObject<{
     input: ({
         type: "text";
         text: string;
+        user_message?: string | undefined;
     } | {
         data: string;
         type: "image";
@@ -13765,6 +13874,16 @@ interface NexusServerClientOptions {
     directory: string;
     token: string;
 }
+interface RemoteSessionMeta {
+    id: string;
+    cwd: string;
+    ts: number;
+    messageCount: number;
+    revision: number;
+    mode?: Mode;
+    planReturnMode?: NonPlanMode;
+    todo?: string;
+}
 interface RemoteChangeReviewEntry {
     changeSetId: string;
     proposalHash: string;
@@ -13892,27 +14011,15 @@ declare class NexusServerClient {
         messageCount: number;
         revision: number;
     }>>;
-    createSession(): Promise<{
-        id: string;
-        cwd: string;
-        ts: number;
-        messageCount: number;
-        revision: number;
-        mode?: Mode;
-    }>;
+    createSession(): Promise<RemoteSessionMeta>;
     getMessages(sessionId: string, opts?: {
         limit?: number;
         offset?: number;
     }): Promise<SessionMessage[]>;
-    getSession(sessionId: string): Promise<{
-        id: string;
-        cwd: string;
-        ts: number;
-        messageCount: number;
-        revision: number;
-        mode?: Mode;
-    }>;
-    setSessionMode(sessionId: string, mode: Mode): Promise<void>;
+    getSession(sessionId: string): Promise<RemoteSessionMeta>;
+    setSessionMode(sessionId: string, mode: Mode, options?: {
+        todo?: string;
+    }): Promise<void>;
     getRecentMessages(sessionId: string, limit?: number): Promise<SessionMessage[]>;
     deleteSession(sessionId: string): Promise<boolean>;
     abortSession(sessionId: string): Promise<boolean>;
@@ -15080,6 +15187,7 @@ interface TurnExecutionSnapshot {
 type SessionInputPart = {
     type: "text";
     text: string;
+    user_message?: string;
 } | {
     type: "image";
     mimeType: string;
@@ -15635,4 +15743,4 @@ declare class GitStatusParseError extends Error {
 }
 declare function parseGitStatusV2(output: Uint8Array): ParsedGitStatus;
 
-export { type AdmitSessionInputCommand, type AdmittedSessionInput, type AgentDefinition, type AgentEvent, type AgentExecutionIdentity, type AppliedReplacementSnippet, type ApprovalAction, type AtomicWriteOptions, type AttachSessionTurnOptions, type AuthorizedNetworkRequest, BROWSER_TOOLS, type BackgroundProcessRecord, BackgroundProcessSupervisor, type BackgroundTaskRecord, type CapturedFileState, type CatalogModel, type CatalogProvider, type ChangeFileRecord, type ChangeHunk, type ChangeIdentity, type ChangeOmission, type ChangeProposalAfterState, type ChangeProposalFile, ChangeSetApprovalError, type ChangeSetBatchConflict, type ChangeSetBatchRevertResult, type ChangeSetBlobPruneResult, ChangeSetConflictError, type ChangeSetFailure, type ChangeSetFilePort, type ChangeSetListQuery, type ChangeSetRecord, ChangeSetService, type ChangeSetServiceOptions, type ChangeSetState, ChangeSetStorageCorruptionError, type ChangeSetStore, ChangeSetStoreConflictError, type ChangedFile, type CheckpointEntry, type CheckpointStorageOptions, CheckpointTracker, CodebaseIndexer, type CodebaseIndexerHostOptions, type CompactionProjectionResult, ConfigFileError, ConfigSubstitutionError, ConfigValidationError, type ContextUsageSnapshot, type CoordinatorEvent, type CreateChangeProposal, type CredentialIdentity, type CredentialPurpose, type CustomToolTrustEvaluation, type CustomToolTrustGrant, type CustomToolTrustReason, CustomToolTrustStore, CustomToolTrustStoreError, type CustomToolTrustStoreOptions, DEFAULT_BATCH_PROCESSING_CONCURRENCY, DEFAULT_EXECUTABLE_TREE_LIMITS, DEFAULT_GIT_DIFF_LIMITS, DEFAULT_HEARTBEAT_TIMEOUT_MS, DEFAULT_MAX_INDEXED_FILES, DEFAULT_MAX_PENDING_EMBED_BATCHES, DEFAULT_PLUGIN_FINGERPRINT_LIMITS, type DeferredToolDef, type DeleteSessionOptions, type DiagnosticItem, type DiffFile, type DiffHunk, type DiffResult, DurableRunEventSink, type DurableRunEventSinkOptions, type DurableRunRecord, type DurableSessionTurn, type EmbeddingClient, type EmbeddingConfig, type ExecutableTreeLimits, type ExecutableTreeSnapshot, FileChangeSetStore, type FileChangeSetStoreOptions, type FileLockOptions, FileLockTimeoutError, FileMutationConflictError, FileRemoteTurnRecoveryStore, type FileRemoteTurnRecoveryStoreOptions, type FileStateRef, type FinalizeConfigCredentialsOptions, type FinishTurnCommit, GitCommandExecutionError, type GitCommandFailureKind, type GitCommandLimits, type GitCommandResult, GitCommandRunner, type GitCommandRunnerOptions, type GitCommandRunnerPort, type GitDiffLimits, type GitDiffRequest, type GitDiffResult, type GitDiffScope, type GitFileDiff, type GitIgnoredStatusEntry, type GitIndexStatus, type GitOmission, type GitOperation, type GitOrdinaryStatusEntry, type GitRenameStatusEntry, GitService, type GitServiceOptions, type GitStatusEntry, GitStatusParseError, type GitStatusSnapshot, type GitSubmoduleStatus, type GitUnmergedStatusEntry, type GitUntrackedStatusEntry, type HostCapabilities, type HostFileMutation, type HostFileMutationNext, type HostNetworkRequest, type HostPathAccess, type HostReadFileOptions, type IHost, type IIndexer, INDEX_FILE_WATCHER_DEBOUNCE_MS, type ISession, type IndexSearchOptions, type IndexSearchResult, type IndexStatus, type IndexerFactoryOptions, type InterruptTurnCommand, InterruptTurnCommandSchema, type JsonRecoveryResult, type LLMClient, LegacyAgentEventSchema, type LegacyMemoryImportResult, type LegacyMemoryRecord, type ListIndexAbsolutePathsFn, type LoadedSlashCommand, type LspCallRecord, type LspLocation, type LspOperation, type LspPosition, type LspQueryRequest, type LspQueryResult, type LspRange, type LspSymbolRecord, MAX_AGENT_EVENT_JSON_CHARS, MAX_IMAGES_PER_INPUT, MAX_IMAGE_BASE64_CHARS, MAX_INPUT_PARTS, MAX_MEMORY_CONTENT_CHARS, MAX_MEMORY_IDENTIFIER_CHARS, MAX_MEMORY_RELATION_IDS, MAX_MEMORY_SOURCE_URI_CHARS, MAX_MEMORY_TITLE_CHARS, MAX_MODEL_TOOL_NAME_CHARS, MAX_REMOTE_MCP_PROMPT_ARGUMENTS, MAX_REMOTE_MCP_PROMPT_ARGUMENT_VALUE_CHARS, MAX_REMOTE_MCP_PROMPT_CATALOG_CHARS, MAX_REMOTE_MCP_PROMPT_COMMANDS, MAX_USER_INPUT_TEXT_CHARS, MEMORY_SCHEMA_VERSION, MODES, MODE_TOOL_GROUPS, ManagedWorkspaceRuntime, type McpAuthRequest, type McpAuthResult, type McpAuthorizedFetchOptions, McpClient, type McpClientOptions, type McpConnectionState, type McpNodeRequestFactory, type McpPinnedNodeHopOptions, type McpPromptArgument, type McpPromptContent, type McpPromptMessage, type McpPromptRef, type McpPromptResult, type McpRemoteAuthorizationRequest, type McpRemoteFetchHop, type McpRemoteFetchHopRequest, type McpRemoteRequestAuthorizer, type McpResourceClient, type McpResourceContent, type McpResourceRef, type McpResourceTemplateRef, type McpServerConfig, McpServerConfigSchema, type McpServerStatus, type McpTool, type McpTransportFactoryOptions, type MemoryRecord, type MemoryRetrievalOptions, type MemoryRetrievalResult, MemoryValueLimitError, type MessagePart, type Mode, type ModeChangeResult, type ModeConfig, ModeSchema, ModelSelectionSchema, type ModelSelectionSnapshot, type ModelsCatalog, NEXUS_CUSTOM_OPTION_ID, NEXUS_QUESTIONNAIRE_RESPONSE_PREFIX, NEXUS_SECRETS_STORAGE_KEY, NEXUS_SERVER_TOKEN_SECRET_KEY, NetworkPolicyError, type NetworkPolicyErrorCode, type NetworkPolicyOptions, NetworkRequestError, type NetworkRequestErrorCode, type NetworkRequestOptions, type NetworkRequestPurpose, type NetworkResolver, type NetworkResourceResponse, type NetworkTransport, type NetworkTransportRequest, type NetworkTransportResponse, type NexusConfig, NexusConfigSchema, type NexusRunServices, type NexusSecretsPayload, type NexusSecretsStore, NexusServerClient, type NexusServerClientOptions, OrchestrationCorruptionError, type OrchestrationDiagnostic, type OrchestrationDiagnosticCode, OrchestrationInvariantError, OrchestrationRuntime, type OrchestrationRuntimeOptions, PROJECT_AUTHORITY_REQUEST_KINDS, PROTOCOL_VERSION, ParallelAgentManager, type ParseSessionCommandResult, type ParsedGitStatus, type PendingProjectAuthorityRequest, type PendingProjectMcpServer, type PendingRunApproval, type PendingSessionApproval, PendingSessionApprovalSchema, type PendingSessionApprovalSnapshot, type PermissionResult, type PersistSecretsOptions, type PersistedContextUsage, type PersistedToolOutputProtection, type PersistedTurnCursor, type PluginCapabilityDiagnostic, type PluginDiagnostic, type PluginDiscoveryResult, type PluginFingerprintLimits, type PluginManifestRecord, type PluginMcpCapabilityResult, type PluginTrustEvaluation, type PluginTrustGrant, type PluginTrustReason, PluginTrustStoreCorruptionError, type PluginTrustStoreOptions, type PreparedSessionTurnIdentity, PreparedSessionTurnIdentitySchema, ProfileCredentialCollisionError, type ProfileCredentialRemoval, type ProjectAuthorityPayloadByKind, type ProjectAuthorityRequestKind, ProjectRegistry, type ProjectSettings, type ProtocolEnvelope, ProtocolEnvelopeSchema, type ProtocolError, ProtocolErrorCodeSchema, ProtocolErrorSchema, ProtocolPayloadSchema, ProtocolPersistenceSchema, type ProviderConfig, type ProviderContextAnchor, type ProviderName, type QuestionOptionRow, type QueueTurnCommand, QueueTurnCommandSchema, READ_ONLY_TOOLS, type RegistrationResult, type RemoteChangeReviewEntry, type RemoteChangeReviewSnapshot, type RemoteMcpPromptArgument, RemoteMcpPromptArgumentSchema, type RemoteMcpPromptCatalog, RemoteMcpPromptCatalogSchema, type RemoteMcpPromptCommand, RemoteMcpPromptCommandSchema, type RemoteMcpPromptResolveRequest, RemoteMcpPromptResolveRequestSchema, type RemoteMcpPromptResolveResponse, RemoteMcpPromptResolveResponseSchema, type RemotePreparedTurnRecord, RemotePreparedTurnRecordSchema, type RemoteSessionRecord, type RemoteTurnCursorRecord, type RemoteTurnRecoveryStore, type ResolveApprovalCommand, ResolveApprovalCommandSchema, type ResolveBundledOptions, type ResolvedCredential, type ResolvedNetworkAddress, type ResolvedSkillBody, type RetrievedMemory, type RunEventDiagnostic, type RunEventEnvelope, RunEventStore, type RunEventStoreOptions, type RunSessionTurnOptions, type RunStatus, type RunToolArtifact, SESSION_COORDINATOR_STORAGE_PORT_VERSION, SESSION_PROTOCOL_SERVICE_PORT_VERSION, type SanitizedMemoryValue, type SaveSessionOptions, SecretsCorruptionError, type SecretsCorruptionReason, type SecretsRemoval, Session, type SessionApprovalIdentity, type SessionCommandReceipt, SessionCommandReceiptSchema, SessionCommandSchema, type SessionCommandV2, SessionConflictError, SessionCoordinator, SessionCoordinatorError, type SessionCoordinatorOptions, type SessionCoordinatorStorage, SessionCorruptionError, type SessionInputPart, type SessionMessage, type SessionMode, type SessionOwnershipFence, type SessionPhase, SessionProtocolError, type SessionProtocolService, type SessionProtocolSnapshot, SessionProtocolSnapshotSchema, type SessionRecoverySnapshot, type SessionRuntimeSnapshot, type SessionStorageDiagnostic, type SessionStorageDiagnosticCode, SessionStore, type SessionStoreOptions, type SessionTurnIdentity, SessionTurnTerminalError, type SkillAuthority, type SkillDef, type SkillLoadDiagnostic, type SkillLoadDiagnosticCode, type SkillLoadOptions, SkillNameAmbiguityError, type SkillToolDescriptionRow, type SlashCommandResolution, type StartTurnCommand, StartTurnCommandSchema, type SteerTurnCommand, SteerTurnCommandSchema, StorageCorruptionError, type StorageDiagnostic, type StorageDiagnosticCode, type StoredContextUsage, type StoredSession, type StoredSessionMeta, type SubAgentRuntimeContext, type SymbolKind, TOOL_GROUP_MEMBERS, type TaskKind, type TaskRecord, type TaskStatus, type TeamRecord, type TextPart, type ToolContext, type ToolContributionDiagnostic, type ToolContributionDiagnosticCode, type ToolContributionSnapshot, type ToolDef, type ToolExecutionEnvironment, type ToolExecutionIdentity, type ToolExecutionOrigin, type ToolExecutionOutcome, type ToolExecutionRequest, type ToolIntegrationProvenance, type ToolOutputMaintenanceOptions, type ToolOutputMaintenanceResult, type ToolPart, ToolRegistry, type ToolResult, type ToolSpillRegistryEntry, type TurnEpochSnapshot, type TurnExecutionSnapshot, TurnExecutionSnapshotSchema, type TurnHandle, type TurnRunner, type TurnRunnerContext, type TurnRunnerResult, UnsafeConfigWriteError, UnsafeCustomToolSourceError, UnsafePluginContentError, UnsafeSessionIdError, UnsupportedSecretsVersionError, UserInputPartSchema, type UserInputPartV2, type UserQuestionAnswer, type UserQuestionItem, type UserQuestionOption, type UserQuestionRequest, WORKSPACE_AUTHORITY_STORE_VERSION, type WorkingDirectoryChangeResult, type WorkspaceAuthorityGrant, type WorkspaceAuthorityGrants, type WorkspaceAuthorityIdentity, type WorkspaceAuthorityRecord, WorkspaceAuthorityStoreError, type WorkspaceAuthorityStoreErrorCode, type WorkspaceAuthorityStoreOptions, type WorkspaceOwnedService, WorkspacePathAuthorizationError, type WorkspacePathAuthorizationErrorCode, type WorkspaceProjectAuthorityApproval, type WorkspaceRuntime, type WorkspaceRuntimeFactory, type WorkspaceRuntimeHandle, WorkspaceRuntimeRegistry, type WorkspaceRuntimeServices, type WorkspaceTaskHandle, WorkspaceTaskSupervisor, WorkspaceToolContributionManager, WorkspaceToolContributionManagerClosedError, type WorkspaceToolContributionManagerOptions, type WorktreeSession, appendCompactionSnippetToSessionMemory, applyPluginRuntimeSettings, applySecretsToConfig, applyWorkspaceAuthorityGrants, approvalGrantKey, approveWorkspaceProjectAuthority, assertAgentExecutionIdentity, assertChangeSetTransition, assertMemoryWriteInput, atomicWriteFile, atomicWriteJson, authorizeNetworkRequest, buildDurableChangeHunks, buildIndexWatcherGlobPattern, buildMcpToolSchema, buildRemoteMcpPromptCatalog, buildReviewPromptBranch, buildReviewPromptUncommitted, buildSkillToolDynamicDescription, buildSystemPrompt, callableMcpToolName, canonParallelInnerRecipient, canonicalProjectRoot, canonicalizeCredentialDestination, canonicalizeNexusServerBaseUrl, catalogSelectionToModel, clearToolSpillsForSession, closeNexusRunServices, collectGitDiff, compactSessionAndPersist, computeContextUsageMetrics, createAgentRunSnapshotTool, createCodebaseIndexer, createCompaction, createEmbeddingClient, createFileSecretsStore, createLLMClient, createListAgentRunsTool, createMcpAuthorizedFetch, createMcpPinnedLookup, createMcpResourceTools, createMcpTransport, createNexusRunServices, createNodePinnedMcpFetchHop, createPendingProjectAuthorityRequest, createResumeAgentTool, createSanitizedGitEnvironment, createSpawnAgentOutputTool, createSpawnAgentStopTool, createSpawnAgentTool, createSpawnAgentsAliasTool, createSpawnAgentsParallelTool, createTaskCreateBatchTool, createTaskResumeTool, createTaskSnapshotTool, credentialIdentityKey, delegatedAgentDescriptionFromParallelInnerParams, delegatedAgentExecutionIdentity, deleteSession, deriveSessionTitle, discoverPluginManifests, effectiveUrlTransport, ensureGlobalConfigDir, ensureQdrantRunning, ensureTeamMemberForTask, estimateActiveContextSessionTokens, estimateTokens, estimateToolsDefinitionsTokens, evaluatePluginTrust, exactChangeHunkDiffStats, exactLineDiffStats, executeToolPipeline, extractMemoriesFromCompactionSummary, fetchSkillUrlRegistryRoots, finalizeConfigCredentials, fingerprintExecutableTree, fingerprintProjectAuthorityPayload, formatQuestionnaireAnswersForAgent, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getClaudeCompatibilityOptions, getConfigEnvironment, getContextWindowLimit, getDefaultAutoMemoryDir, getEmbeddingCredentialIdentity, getFileLockPath, getGlobalConfigDir, getIndexDir, getIndexableExtensions, getModelsCatalog, getModelsPath, getModelsUrl, getNexusDataDir, getNexusServerTokenSecretKey, getOrchestrationRuntime, getParallelDelegatedAgentTaskDescriptions, getPendingProjectAuthorityRequests, getPendingProjectMcpServers, getPlanContentForFollowup, getPluginTrustStorePath, getProjectHash, getProviderCredentialIdentity, getRunLogsDir, getRuntimeDir, getSecretsPayloadFromConfig, getSessionMemoryFilePath, getSessionMeta, getSessionModeForResume, getSessionStorageDiagnostics, getToolOutputDir, getToolOutputSpill, getTreeSitterLanguageWasmsDir, getWebTreeSitterWasmPath, getWorkspaceAuthorityIdentity, getWorkspaceAuthorityStorePath, grantPluginTrust, grantWorkspaceAuthority, hadPlanExit, handleCompletedTaskSideEffects, hashChangeProposal, hashFileContent, hashWorkspaceIdentity, hydrateWorkspaceAuthority, importLegacyMemoryFiles, inheritSpillRegistryForMergedToolPart, interpretShellCommandResult, isDelegatedAgentParentTool, isDelegatedAgentParentToolEndClear, isLoopbackNexusServerDestination, isPublicNetworkAddress, isPureSubagentParallelInput, isValidPendingProjectAuthorityRequest, listPluginTrustGrants, listSessions, listToolSpillsForSession, listWorkspaceAuthorities, loadAgentDefinitions, loadAgentInstructionBundle, loadAutoMemoryMarkdown, loadConfig, loadGlobalSettings, loadPluginManifests, loadPluginMcpServers, loadPluginRuntimeRecords, loadProjectSettings, loadRules, loadSession, loadSessionMessages, loadSkillToolCatalogRows, loadSkills, loadSlashCommands, loadTeamMemoryMarkdown, loadTrustedPluginRuntimeRecords, loadWorkspaceAuthority, mcpPromptCommandName, mcpPromptOpaqueId, mergeEmbeddingConfigSafely, mergeModelPresetSelection, mergeNexusConfigLayers, mergeProviderConfigPartialSafely, mergeProviderConfigSafely, mutateSession, nodePinnedTransport, normalizeAwsRegion, normalizeAzureResourceName, normalizeChangePath, normalizeMemoryRecord, normalizedAppliedReplacementsFromMetadata, parallelInnerUseIsDelegatedAgent, parseGitStatusV2, parseMentions, parseSessionCommand, patchGlobalConfig, patchProjectConfig, persistSecretsFromConfig, projectPersistedCompactionSummary, readCheckpointEntries, readJsonWithRecovery, readSessionMemoryFile, reapplyRevertedChangeSets, reconcilePersistedContextUsage, redactMemorySecrets, refreshSessionMemoryFile, registerInheritedRunTools, registerToolContributionSnapshot, registerToolOutputSpill, renderMcpPromptResult, renderSlashCommandPrompt, requestNetworkResource, resolveAuthorizedWorkspacePath, resolveAutoMemoryDirectory, resolveBundledMcpServers, resolveConfiguredAndPluginMcpServers, resolveEmbeddingCredential, resolvePluginDeclaredPath, resolveProviderCredential, resolveSkillBody, resolveSlashCommand, restrictDelegatedMode, retrieveMemories, revertEffectiveChangeSetsAfter, revokePluginTrust, revokeWorkspaceAuthority, revokeWorkspaceProjectAuthority, runAgentLoop, runAutoMemoryDreamIfDue, runPluginHooks, runScopedHooks, sameChangeIdentity, sampleSkillSiblingFiles, sanitizeMemoryValue, saveSession, scheduleSessionMemoryRefresh, scheduleToolOutputMaintenance, selectActiveTurnResumeCursor, selectProviderProfile, setIndexTelemetrySink, settleRuntimeDependency, shouldUseDeferredToolLoading, stripProfileSecrets, stripSecretsFromConfig, testMcpServers, tokenizeMemoryText, toolExecutionIdentity, validatePluginManifestFile, validateQuestionnaireAnswers, withFileLock, writeCheckpointEntries, writeConfig, writeGlobalProfiles, writeGlobalSettings, writeProjectSettings };
+export { type AdmitSessionInputCommand, type AdmittedSessionInput, type AgentDefinition, type AgentEvent, type AgentExecutionIdentity, type AppliedReplacementSnippet, type ApprovalAction, type AtomicWriteOptions, type AttachSessionTurnOptions, type AuthorizedNetworkRequest, BROWSER_TOOLS, type BackgroundProcessRecord, BackgroundProcessSupervisor, type BackgroundTaskRecord, type CapturedFileState, type CatalogModel, type CatalogProvider, type ChangeFileRecord, type ChangeHunk, type ChangeIdentity, type ChangeOmission, type ChangeProposalAfterState, type ChangeProposalFile, ChangeSetApprovalError, type ChangeSetBatchConflict, type ChangeSetBatchRevertResult, type ChangeSetBlobPruneResult, ChangeSetConflictError, type ChangeSetFailure, type ChangeSetFilePort, type ChangeSetListQuery, type ChangeSetRecord, ChangeSetService, type ChangeSetServiceOptions, type ChangeSetState, ChangeSetStorageCorruptionError, type ChangeSetStore, ChangeSetStoreConflictError, type ChangedFile, type CheckpointEntry, type CheckpointStorageOptions, CheckpointTracker, CodebaseIndexer, type CodebaseIndexerHostOptions, type CompactionProjectionResult, ConfigFileError, ConfigSubstitutionError, ConfigValidationError, type ContextUsageSnapshot, type CoordinatorEvent, type CreateChangeProposal, type CredentialIdentity, type CredentialPurpose, type CustomToolTrustEvaluation, type CustomToolTrustGrant, type CustomToolTrustReason, CustomToolTrustStore, CustomToolTrustStoreError, type CustomToolTrustStoreOptions, DEFAULT_BATCH_PROCESSING_CONCURRENCY, DEFAULT_EXECUTABLE_TREE_LIMITS, DEFAULT_GIT_DIFF_LIMITS, DEFAULT_HEARTBEAT_TIMEOUT_MS, DEFAULT_MAX_INDEXED_FILES, DEFAULT_MAX_PENDING_EMBED_BATCHES, DEFAULT_PLUGIN_FINGERPRINT_LIMITS, type DeferredToolDef, type DeleteSessionOptions, type DiagnosticItem, type DiffFile, type DiffHunk, type DiffResult, DurableRunEventSink, type DurableRunEventSinkOptions, type DurableRunRecord, type DurableSessionTurn, type EmbeddingClient, type EmbeddingConfig, type ExecutableTreeLimits, type ExecutableTreeSnapshot, FileChangeSetStore, type FileChangeSetStoreOptions, type FileLockOptions, FileLockTimeoutError, FileMutationConflictError, FileRemoteTurnRecoveryStore, type FileRemoteTurnRecoveryStoreOptions, type FileStateRef, type FinalizeConfigCredentialsOptions, type FinishTurnCommit, GitCommandExecutionError, type GitCommandFailureKind, type GitCommandLimits, type GitCommandResult, GitCommandRunner, type GitCommandRunnerOptions, type GitCommandRunnerPort, type GitDiffLimits, type GitDiffRequest, type GitDiffResult, type GitDiffScope, type GitFileDiff, type GitIgnoredStatusEntry, type GitIndexStatus, type GitOmission, type GitOperation, type GitOrdinaryStatusEntry, type GitRenameStatusEntry, GitService, type GitServiceOptions, type GitStatusEntry, GitStatusParseError, type GitStatusSnapshot, type GitSubmoduleStatus, type GitUnmergedStatusEntry, type GitUntrackedStatusEntry, type HostCapabilities, type HostFileMutation, type HostFileMutationNext, type HostNetworkRequest, type HostPathAccess, type HostReadFileOptions, type IHost, type IIndexer, INDEX_FILE_WATCHER_DEBOUNCE_MS, type ISession, type IndexSearchOptions, type IndexSearchResult, type IndexStatus, type IndexerFactoryOptions, type InterruptTurnCommand, InterruptTurnCommandSchema, type JsonRecoveryResult, type LLMClient, LegacyAgentEventSchema, type LegacyMemoryImportResult, type LegacyMemoryRecord, type ListIndexAbsolutePathsFn, type LoadedSlashCommand, type LspCallRecord, type LspLocation, type LspOperation, type LspPosition, type LspQueryRequest, type LspQueryResult, type LspRange, type LspSymbolRecord, MAX_AGENT_EVENT_JSON_CHARS, MAX_IMAGES_PER_INPUT, MAX_IMAGE_BASE64_CHARS, MAX_INPUT_PARTS, MAX_MEMORY_CONTENT_CHARS, MAX_MEMORY_IDENTIFIER_CHARS, MAX_MEMORY_RELATION_IDS, MAX_MEMORY_SOURCE_URI_CHARS, MAX_MEMORY_TITLE_CHARS, MAX_MODEL_TOOL_NAME_CHARS, MAX_REMOTE_MCP_PROMPT_ARGUMENTS, MAX_REMOTE_MCP_PROMPT_ARGUMENT_VALUE_CHARS, MAX_REMOTE_MCP_PROMPT_CATALOG_CHARS, MAX_REMOTE_MCP_PROMPT_COMMANDS, MAX_USER_INPUT_TEXT_CHARS, MEMORY_SCHEMA_VERSION, MODES, MODE_TOOL_GROUPS, ManagedWorkspaceRuntime, type McpAuthRequest, type McpAuthResult, type McpAuthorizedFetchOptions, McpClient, type McpClientOptions, type McpConnectionState, type McpNodeRequestFactory, type McpPinnedNodeHopOptions, type McpPromptArgument, type McpPromptContent, type McpPromptMessage, type McpPromptRef, type McpPromptResult, type McpRemoteAuthorizationRequest, type McpRemoteFetchHop, type McpRemoteFetchHopRequest, type McpRemoteRequestAuthorizer, type McpResourceClient, type McpResourceContent, type McpResourceRef, type McpResourceTemplateRef, type McpServerConfig, McpServerConfigSchema, type McpServerStatus, type McpTool, type McpTransportFactoryOptions, type MemoryRecord, type MemoryRetrievalOptions, type MemoryRetrievalResult, MemoryValueLimitError, type MessagePart, type Mode, type ModeChangeResult, type ModeConfig, ModeSchema, ModelSelectionSchema, type ModelSelectionSnapshot, type ModelsCatalog, NEXUS_CUSTOM_OPTION_ID, NEXUS_QUESTIONNAIRE_RESPONSE_PREFIX, NEXUS_SECRETS_STORAGE_KEY, NEXUS_SERVER_TOKEN_SECRET_KEY, NetworkPolicyError, type NetworkPolicyErrorCode, type NetworkPolicyOptions, NetworkRequestError, type NetworkRequestErrorCode, type NetworkRequestOptions, type NetworkRequestPurpose, type NetworkResolver, type NetworkResourceResponse, type NetworkTransport, type NetworkTransportRequest, type NetworkTransportResponse, type NexusConfig, NexusConfigSchema, type NexusRunServices, type NexusSecretsPayload, type NexusSecretsStore, NexusServerClient, type NexusServerClientOptions, type NonPlanMode, OrchestrationCorruptionError, type OrchestrationDiagnostic, type OrchestrationDiagnosticCode, OrchestrationInvariantError, OrchestrationRuntime, type OrchestrationRuntimeOptions, PROJECT_AUTHORITY_REQUEST_KINDS, PROTOCOL_VERSION, ParallelAgentManager, type ParseSessionCommandResult, type ParsedGitStatus, type PendingProjectAuthorityRequest, type PendingProjectMcpServer, type PendingRunApproval, type PendingSessionApproval, PendingSessionApprovalSchema, type PendingSessionApprovalSnapshot, type PermissionResult, type PersistSecretsOptions, type PersistedContextUsage, type PersistedToolOutputProtection, type PersistedTurnCursor, type PluginCapabilityDiagnostic, type PluginDiagnostic, type PluginDiscoveryResult, type PluginFingerprintLimits, type PluginManifestRecord, type PluginMcpCapabilityResult, type PluginTrustEvaluation, type PluginTrustGrant, type PluginTrustReason, PluginTrustStoreCorruptionError, type PluginTrustStoreOptions, type PreparedSessionTurnIdentity, PreparedSessionTurnIdentitySchema, ProfileCredentialCollisionError, type ProfileCredentialRemoval, type ProjectAuthorityPayloadByKind, type ProjectAuthorityRequestKind, ProjectRegistry, type ProjectSettings, type ProtocolEnvelope, ProtocolEnvelopeSchema, type ProtocolError, ProtocolErrorCodeSchema, ProtocolErrorSchema, ProtocolPayloadSchema, ProtocolPersistenceSchema, type ProviderConfig, type ProviderContextAnchor, type ProviderName, type QuestionOptionRow, type QueueTurnCommand, QueueTurnCommandSchema, READ_ONLY_TOOLS, type RegistrationResult, type RemoteChangeReviewEntry, type RemoteChangeReviewSnapshot, type RemoteMcpPromptArgument, RemoteMcpPromptArgumentSchema, type RemoteMcpPromptCatalog, RemoteMcpPromptCatalogSchema, type RemoteMcpPromptCommand, RemoteMcpPromptCommandSchema, type RemoteMcpPromptResolveRequest, RemoteMcpPromptResolveRequestSchema, type RemoteMcpPromptResolveResponse, RemoteMcpPromptResolveResponseSchema, type RemotePreparedTurnRecord, RemotePreparedTurnRecordSchema, type RemoteSessionMeta, type RemoteSessionRecord, type RemoteTurnCursorRecord, type RemoteTurnRecoveryStore, type ResolveApprovalCommand, ResolveApprovalCommandSchema, type ResolveBundledOptions, type ResolvedCredential, type ResolvedNetworkAddress, type ResolvedSkillBody, type RetrievedMemory, type RunEventDiagnostic, type RunEventEnvelope, RunEventStore, type RunEventStoreOptions, type RunSessionTurnOptions, type RunStatus, type RunToolArtifact, SESSION_COORDINATOR_STORAGE_PORT_VERSION, SESSION_PROTOCOL_SERVICE_PORT_VERSION, type SanitizedMemoryValue, type SaveSessionOptions, SecretsCorruptionError, type SecretsCorruptionReason, type SecretsRemoval, Session, type SessionApprovalIdentity, type SessionCommandReceipt, SessionCommandReceiptSchema, SessionCommandSchema, type SessionCommandV2, SessionConflictError, SessionCoordinator, SessionCoordinatorError, type SessionCoordinatorOptions, type SessionCoordinatorStorage, SessionCorruptionError, type SessionInputPart, type SessionMessage, type SessionMode, type SessionModeState, type SessionOwnershipFence, type SessionPhase, SessionProtocolError, type SessionProtocolService, type SessionProtocolSnapshot, SessionProtocolSnapshotSchema, type SessionRecoverySnapshot, type SessionRuntimeSnapshot, type SessionStorageDiagnostic, type SessionStorageDiagnosticCode, SessionStore, type SessionStoreOptions, type SessionTurnIdentity, SessionTurnTerminalError, type SkillAuthority, type SkillDef, type SkillLoadDiagnostic, type SkillLoadDiagnosticCode, type SkillLoadOptions, SkillNameAmbiguityError, type SkillToolDescriptionRow, type SlashCommandResolution, type StartTurnCommand, StartTurnCommandSchema, type SteerTurnCommand, SteerTurnCommandSchema, StorageCorruptionError, type StorageDiagnostic, type StorageDiagnosticCode, type StoredContextUsage, type StoredSession, type StoredSessionMeta, type SubAgentRuntimeContext, type SymbolKind, TOOL_GROUP_MEMBERS, type TaskKind, type TaskRecord, type TaskStatus, type TeamRecord, type TextPart, type ToolContext, type ToolContributionDiagnostic, type ToolContributionDiagnosticCode, type ToolContributionSnapshot, type ToolDef, type ToolExecutionEnvironment, type ToolExecutionIdentity, type ToolExecutionOrigin, type ToolExecutionOutcome, type ToolExecutionRequest, type ToolIntegrationProvenance, type ToolOutputMaintenanceOptions, type ToolOutputMaintenanceResult, type ToolPart, ToolRegistry, type ToolResult, type ToolSpillRegistryEntry, type TurnEpochSnapshot, type TurnExecutionSnapshot, TurnExecutionSnapshotSchema, type TurnHandle, type TurnRunner, type TurnRunnerContext, type TurnRunnerResult, UnsafeConfigWriteError, UnsafeCustomToolSourceError, UnsafePluginContentError, UnsafeSessionIdError, UnsupportedSecretsVersionError, UserInputPartSchema, type UserInputPartV2, type UserQuestionAnswer, type UserQuestionItem, type UserQuestionOption, type UserQuestionRequest, WORKSPACE_AUTHORITY_STORE_VERSION, type WorkingDirectoryChangeResult, type WorkspaceAuthorityGrant, type WorkspaceAuthorityGrants, type WorkspaceAuthorityIdentity, type WorkspaceAuthorityRecord, WorkspaceAuthorityStoreError, type WorkspaceAuthorityStoreErrorCode, type WorkspaceAuthorityStoreOptions, type WorkspaceOwnedService, WorkspacePathAuthorizationError, type WorkspacePathAuthorizationErrorCode, type WorkspaceProjectAuthorityApproval, type WorkspaceRuntime, type WorkspaceRuntimeFactory, type WorkspaceRuntimeHandle, WorkspaceRuntimeRegistry, type WorkspaceRuntimeServices, type WorkspaceTaskHandle, WorkspaceTaskSupervisor, WorkspaceToolContributionManager, WorkspaceToolContributionManagerClosedError, type WorkspaceToolContributionManagerOptions, type WorktreeSession, appendCompactionSnippetToSessionMemory, applyPluginRuntimeSettings, applySecretsToConfig, applyWorkspaceAuthorityGrants, approvalGrantKey, approveWorkspaceProjectAuthority, approvedPlanTodo, assertAgentExecutionIdentity, assertChangeSetTransition, assertMemoryWriteInput, atomicWriteFile, atomicWriteJson, authorizeNetworkRequest, buildDurableChangeHunks, buildIndexWatcherGlobPattern, buildMcpToolSchema, buildRemoteMcpPromptCatalog, buildReviewPromptBranch, buildReviewPromptUncommitted, buildSkillToolDynamicDescription, buildSystemPrompt, callableMcpToolName, canonParallelInnerRecipient, canonicalProjectRoot, canonicalizeCredentialDestination, canonicalizeNexusServerBaseUrl, catalogSelectionToModel, clearToolSpillsForSession, closeNexusRunServices, collectGitDiff, compactSessionAndPersist, computeContextUsageMetrics, createAgentRunSnapshotTool, createCodebaseIndexer, createCompaction, createEmbeddingClient, createFileSecretsStore, createLLMClient, createListAgentRunsTool, createMcpAuthorizedFetch, createMcpPinnedLookup, createMcpResourceTools, createMcpTransport, createNexusRunServices, createNodePinnedMcpFetchHop, createPendingProjectAuthorityRequest, createResumeAgentTool, createSanitizedGitEnvironment, createSpawnAgentOutputTool, createSpawnAgentStopTool, createSpawnAgentTool, createSpawnAgentsAliasTool, createSpawnAgentsParallelTool, createTaskCreateBatchTool, createTaskResumeTool, createTaskSnapshotTool, credentialIdentityKey, delegatedAgentDescriptionFromParallelInnerParams, delegatedAgentExecutionIdentity, deleteSession, deriveSessionTitle, discoverPluginManifests, effectiveUrlTransport, ensureGlobalConfigDir, ensureQdrantRunning, ensureTeamMemberForTask, estimateActiveContextSessionTokens, estimateTokens, estimateToolsDefinitionsTokens, evaluatePluginTrust, exactChangeHunkDiffStats, exactLineDiffStats, executeToolPipeline, extractMemoriesFromCompactionSummary, fetchSkillUrlRegistryRoots, finalizeConfigCredentials, fingerprintExecutableTree, fingerprintProjectAuthorityPayload, formatQuestionnaireAnswersForAgent, generateSessionId, getAllBuiltinTools, getBuiltinToolsForMode, getClaudeCompatibilityOptions, getConfigEnvironment, getContextWindowLimit, getDefaultAutoMemoryDir, getEmbeddingCredentialIdentity, getFileLockPath, getGlobalConfigDir, getIndexDir, getIndexableExtensions, getModelsCatalog, getModelsPath, getModelsUrl, getNexusDataDir, getNexusServerTokenSecretKey, getOrchestrationRuntime, getParallelDelegatedAgentTaskDescriptions, getPendingProjectAuthorityRequests, getPendingProjectMcpServers, getPlanContentForFollowup, getPluginTrustStorePath, getProjectHash, getProviderCredentialIdentity, getRunLogsDir, getRuntimeDir, getSecretsPayloadFromConfig, getSessionMemoryFilePath, getSessionMeta, getSessionModeForResume, getSessionStorageDiagnostics, getToolOutputDir, getToolOutputSpill, getTreeSitterLanguageWasmsDir, getWebTreeSitterWasmPath, getWorkspaceAuthorityIdentity, getWorkspaceAuthorityStorePath, grantPluginTrust, grantWorkspaceAuthority, hadPlanExit, handleCompletedTaskSideEffects, hashChangeProposal, hashFileContent, hashWorkspaceIdentity, hydrateWorkspaceAuthority, importLegacyMemoryFiles, inheritSpillRegistryForMergedToolPart, interpretShellCommandResult, isDelegatedAgentParentTool, isDelegatedAgentParentToolEndClear, isLoopbackNexusServerDestination, isPublicNetworkAddress, isPureSubagentParallelInput, isValidPendingProjectAuthorityRequest, listPluginTrustGrants, listSessions, listToolSpillsForSession, listWorkspaceAuthorities, loadAgentDefinitions, loadAgentInstructionBundle, loadAutoMemoryMarkdown, loadConfig, loadGlobalSettings, loadPluginManifests, loadPluginMcpServers, loadPluginRuntimeRecords, loadProjectSettings, loadRules, loadSession, loadSessionMessages, loadSkillToolCatalogRows, loadSkills, loadSlashCommands, loadTeamMemoryMarkdown, loadTrustedPluginRuntimeRecords, loadWorkspaceAuthority, mcpPromptCommandName, mcpPromptOpaqueId, mergeEmbeddingConfigSafely, mergeModelPresetSelection, mergeNexusConfigLayers, mergeProviderConfigPartialSafely, mergeProviderConfigSafely, mutateSession, nodePinnedTransport, normalizeAwsRegion, normalizeAzureResourceName, normalizeChangePath, normalizeMemoryRecord, normalizedAppliedReplacementsFromMetadata, parallelInnerUseIsDelegatedAgent, parseGitStatusV2, parseMentions, parseSessionCommand, patchGlobalConfig, patchProjectConfig, persistSecretsFromConfig, projectPersistedCompactionSummary, readCheckpointEntries, readJsonWithRecovery, readSessionMemoryFile, reapplyRevertedChangeSets, reconcilePersistedContextUsage, redactMemorySecrets, refreshSessionMemoryFile, registerInheritedRunTools, registerToolContributionSnapshot, registerToolOutputSpill, renderMcpPromptResult, renderSlashCommandPrompt, requestNetworkResource, resolveAuthorizedWorkspacePath, resolveAutoMemoryDirectory, resolveBundledMcpServers, resolveConfiguredAndPluginMcpServers, resolveEmbeddingCredential, resolvePluginDeclaredPath, resolveProviderCredential, resolveSkillBody, resolveSlashCommand, restrictDelegatedMode, retrieveMemories, revertEffectiveChangeSetsAfter, revokePluginTrust, revokeWorkspaceAuthority, revokeWorkspaceProjectAuthority, runAgentLoop, runAutoMemoryDreamIfDue, runPluginHooks, runScopedHooks, sameChangeIdentity, sampleSkillSiblingFiles, sanitizeMemoryValue, saveSession, scheduleSessionMemoryRefresh, scheduleToolOutputMaintenance, selectActiveTurnResumeCursor, selectProviderProfile, setIndexTelemetrySink, settleRuntimeDependency, shouldUseDeferredToolLoading, stripProfileSecrets, stripSecretsFromConfig, testMcpServers, tokenizeMemoryText, toolExecutionIdentity, transitionSessionMode, validatePluginManifestFile, validateQuestionnaireAnswers, withFileLock, writeCheckpointEntries, writeConfig, writeGlobalProfiles, writeGlobalSettings, writeProjectSettings };

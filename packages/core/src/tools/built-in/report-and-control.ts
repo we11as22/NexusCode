@@ -258,14 +258,95 @@ Turn boundary (OpenClaude-style):
   },
 }
 
+const todoItemSchema = z.object({
+  id: z.string().trim().min(1).describe("Unique identifier for the todo item"),
+  content: z.string().trim().min(1).describe("The description/content of the todo item"),
+  status: z.enum(["pending", "in_progress", "completed", "cancelled"]).describe("The current status of the todo item"),
+})
+
 const todoSchema = z.object({
   merge: z.boolean().describe("Whether to merge the todos with the existing todos. If true, the todos will be merged into the existing todos based on the id field. If false, the new todos will replace the existing todos."),
-  todos: z.array(z.object({
-    id: z.string().describe("Unique identifier for the todo item"),
-    content: z.string().describe("The description/content of the todo item"),
-    status: z.enum(["pending", "in_progress", "completed", "cancelled"]).describe("The current status of the todo item"),
-  })).describe("Array of todo items to write. When merge is true, items are merged by id; when false, they replace the list."),
+  todos: z.array(todoItemSchema)
+    .max(100)
+    .superRefine((todos, ctx) => {
+      const seen = new Set<string>()
+      let active = 0
+      for (const [index, todo] of todos.entries()) {
+        if (seen.has(todo.id)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: [index, "id"],
+            message: `Duplicate todo id: ${todo.id}`,
+          })
+        }
+        seen.add(todo.id)
+        if (todo.status === "in_progress") active += 1
+      }
+      if (active > 1) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [],
+          message: "At most one todo may be in_progress",
+        })
+      }
+    })
+    .describe("Array of todo items to write. When merge is true, items are merged by id; when false, they replace the list."),
 })
+
+type TodoItem = z.infer<typeof todoItemSchema>
+
+function normalizeTodoContent(content: string): string {
+  return content.normalize("NFKC").trim().replace(/\s+/g, " ").toLocaleLowerCase()
+}
+
+/**
+ * Reconcile incremental model updates with the host-seeded list.
+ *
+ * Plan approval seeds todos before the first implementation turn. Models are not
+ * guaranteed to reuse those opaque ids, so id-only merging duplicates the same
+ * visible milestone. Match by id first and normalized visible content second.
+ */
+function mergeTodoItems(current: TodoItem[], incoming: TodoItem[]): TodoItem[] {
+  const incomingHasActive = incoming.some((todo) => todo.status === "in_progress")
+  const result = current.map((todo) => ({
+    ...todo,
+    status:
+      incomingHasActive && todo.status === "in_progress"
+        ? "pending" as const
+        : todo.status,
+  }))
+
+  for (const todo of incoming) {
+    const contentKey = normalizeTodoContent(todo.content)
+    const indexById = result.findIndex((candidate) => candidate.id === todo.id)
+    const indexByContent = result.findIndex(
+      (candidate) => normalizeTodoContent(candidate.content) === contentKey,
+    )
+    const index = indexById >= 0 ? indexById : indexByContent
+    const replacement = { ...todo }
+    if (index >= 0) {
+      result[index] = replacement
+    } else {
+      result.push(replacement)
+    }
+  }
+
+  // Repair legacy/corrupt state defensively: one visible milestone per content
+  // and at most one active item, matching the contract exposed to the model.
+  const seenContent = new Set<string>()
+  let activeSeen = false
+  return result.flatMap((todo) => {
+    const contentKey = normalizeTodoContent(todo.content)
+    if (seenContent.has(contentKey)) return []
+    seenContent.add(contentKey)
+    if (todo.status !== "in_progress") return [todo]
+    if (!activeSeen) {
+      activeSeen = true
+      return [todo]
+    }
+    return [{ ...todo, status: "pending" as const }]
+  })
+}
 
 export const todoWriteTool: ToolDef<z.infer<typeof todoSchema>> = {
   name: "TodoWrite",
@@ -291,30 +372,42 @@ Task states: pending | in_progress | completed | cancelled. Use merge=true to up
 
   async execute({ merge, todos }, ctx: ToolContext) {
     const raw = ctx.session.getTodo().trim()
-    let current: Array<{ id: string; content: string; status: string }> = []
+    let current: TodoItem[] = []
     if (raw && raw.startsWith("[")) {
       try {
-        const parsed = JSON.parse(raw) as Array<{ id?: string; content?: string; status?: string }>
+        const parsed = JSON.parse(raw) as unknown
         if (Array.isArray(parsed)) {
-          current = parsed
-            .filter((i): i is { id: string; content: string; status: string } =>
-              typeof i.id === "string" && typeof i.content === "string" && typeof i.status === "string")
-            .map(i => ({ id: i.id, content: i.content, status: i.status }))
+          current = parsed.flatMap((item) => {
+            const validated = todoItemSchema.safeParse(item)
+            return validated.success ? [validated.data] : []
+          })
         }
       } catch {
         // ignore invalid JSON
       }
     }
     const next = merge
-      ? (() => {
-          const byId = new Map(current.map(t => [t.id, t]))
-          for (const t of todos) {
-            byId.set(t.id, { id: t.id, content: t.content, status: t.status })
-          }
-          return Array.from(byId.values())
-        })()
-      : todos.map(t => ({ id: t.id, content: t.content, status: t.status }))
-    ctx.session.updateTodo(JSON.stringify(next))
-    return { success: true, output: "Todo list updated." }
+      ? mergeTodoItems(current, todos)
+      : todos.map(t => ({ ...t }))
+    if (next.length > 100) {
+      return {
+        success: false,
+        output: "Todo list would exceed the 100-item safety limit; replace or complete existing milestones first.",
+      }
+    }
+    const allCompleted =
+      next.length > 0 &&
+      next.every((todo) => todo.status === "completed")
+    ctx.session.updateTodo(
+      next.length === 0 || allCompleted ? "" : JSON.stringify(next),
+    )
+    return {
+      success: true,
+      output: allCompleted
+        ? "Todo list completed and cleared."
+        : next.length === 0
+          ? "Todo list cleared."
+          : "Todo list updated.",
+    }
   },
 }

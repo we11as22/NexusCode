@@ -11,6 +11,55 @@ import type {
 
 const MAX_PLAN_FOLLOWUP_BYTES = 1024 * 1024
 const MODES = new Set<Mode>(["agent", "plan", "ask", "debug", "review"])
+const MAX_APPROVED_PLAN_TODOS = 20
+const MAX_APPROVED_PLAN_TODO_CHARS = 500
+
+function cleanPlanMilestone(value: string): string {
+  return value
+    .replace(/^\[[ xX-]\]\s*/, "")
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/[*~`]+/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, MAX_APPROVED_PLAN_TODO_CHARS)
+}
+
+/**
+ * Turn an approved plan into immediate, visible execution state. OpenClaude
+ * tells the model to create todos after approval; Nexus also materializes the
+ * deterministic first checklist so reloads and provider failures cannot lose
+ * the user's approved work.
+ */
+export function approvedPlanTodo(planText: string): string {
+  const milestones: string[] = []
+  for (const rawLine of planText.split(/\r?\n/)) {
+    const match = rawLine.match(/^\s*(?:[-*+]|\d+[.)])\s+(.+)$/)
+    if (!match) continue
+    const milestone = cleanPlanMilestone(match[1] ?? "")
+    if (!milestone || milestones.includes(milestone)) continue
+    milestones.push(milestone)
+    if (milestones.length >= MAX_APPROVED_PLAN_TODOS) break
+  }
+
+  if (milestones.length === 0) {
+    const prose = planText
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith("#"))
+      .map(cleanPlanMilestone)
+      .find(Boolean)
+    milestones.push(prose || "Implement the approved plan.")
+  }
+
+  return JSON.stringify(
+    milestones.map((content, index) => ({
+      id: `plan-${index + 1}`,
+      content,
+      status: index === 0 ? "in_progress" : "pending",
+    })),
+  )
+}
 
 /**
  * Kilocode-style: detect if the last assistant message completed plan_exit,

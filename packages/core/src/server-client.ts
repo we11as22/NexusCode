@@ -6,6 +6,7 @@ import type {
   SessionMessage,
 } from "./types.js"
 import { canonicalProjectRoot } from "./session/storage.js"
+import type { NonPlanMode } from "./session/mode-transition.js"
 import {
   MAX_AGENT_EVENT_JSON_CHARS,
   PROTOCOL_VERSION,
@@ -38,6 +39,17 @@ export interface NexusServerClientOptions {
   baseUrl: string
   directory: string
   token: string
+}
+
+export interface RemoteSessionMeta {
+  id: string
+  cwd: string
+  ts: number
+  messageCount: number
+  revision: number
+  mode?: Mode
+  planReturnMode?: NonPlanMode
+  todo?: string
 }
 
 export interface RemoteChangeReviewEntry {
@@ -1102,14 +1114,14 @@ export class NexusServerClient {
     return res.json() as Promise<Array<{ id: string; ts: number; title?: string; messageCount: number; revision: number }>>
   }
 
-  async createSession(): Promise<{ id: string; cwd: string; ts: number; messageCount: number; revision: number; mode?: Mode }> {
+  async createSession(): Promise<RemoteSessionMeta> {
     const res = await this.request(this.url("/session"), {
       method: "POST",
       headers: this.headers(),
       body: JSON.stringify({}),
     })
     if (!res.ok) throw new Error(`Server createSession: ${res.status} ${await res.text()}`)
-    return res.json() as Promise<{ id: string; cwd: string; ts: number; messageCount: number; revision: number; mode?: Mode }>
+    return res.json() as Promise<RemoteSessionMeta>
   }
 
   async getMessages(
@@ -1130,15 +1142,19 @@ export class NexusServerClient {
     return res.json() as Promise<SessionMessage[]>
   }
 
-  async getSession(sessionId: string): Promise<{ id: string; cwd: string; ts: number; messageCount: number; revision: number; mode?: Mode }> {
+  async getSession(sessionId: string): Promise<RemoteSessionMeta> {
     const res = await this.request(this.url(this.sessionPath(sessionId), { directory: this.directory }), {
       headers: this.headers(),
     })
     if (!res.ok) throw new Error(`Server getSession: ${res.status} ${await res.text()}`)
-    return res.json() as Promise<{ id: string; cwd: string; ts: number; messageCount: number; revision: number; mode?: Mode }>
+    return res.json() as Promise<RemoteSessionMeta>
   }
 
-  async setSessionMode(sessionId: string, mode: Mode): Promise<void> {
+  async setSessionMode(
+    sessionId: string,
+    mode: Mode,
+    options: { todo?: string } = {},
+  ): Promise<void> {
     const res = await this.request(
       this.url(`${this.sessionPath(sessionId)}/mode`, {
         directory: this.directory,
@@ -1146,7 +1162,10 @@ export class NexusServerClient {
       {
         method: "PATCH",
         headers: this.headers(),
-        body: JSON.stringify({ mode }),
+        body: JSON.stringify({
+          mode,
+          ...(options.todo !== undefined ? { todo: options.todo } : {}),
+        }),
       },
     )
     if (!res.ok) {

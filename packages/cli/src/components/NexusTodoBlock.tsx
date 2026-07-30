@@ -34,15 +34,32 @@ export function NexusTodoBlock({ todo }: Props): React.ReactNode {
   const items = useMemo(() => parseTodoList(todo), [todo])
   if (items.length === 0) return null
 
-  const doneCount = items.filter(i => {
+  const completedCount = items.filter(i => {
     const isTw = typeof i.id === 'string' && typeof i.content === 'string' && typeof i.status === 'string'
-    return isTw ? (i.status === 'completed' || i.status === 'cancelled') : Boolean(i.done)
+    return isTw ? i.status === 'completed' : Boolean(i.done)
   }).length
+  // Match the live OpenClaude-style lifecycle used by TodoWrite: a fully
+  // completed list is no longer active UI state. Historical tool output is
+  // still present in the transcript.
+  if (completedCount === items.length) return null
+  const cancelledCount = items.filter(i =>
+    typeof i.id === 'string' &&
+    typeof i.content === 'string' &&
+    typeof i.status === 'string' &&
+    i.status === 'cancelled'
+  ).length
   const inProgressCount = items.filter(i =>
     typeof i.id === 'string' && typeof i.content === 'string' && typeof i.status === 'string' && i.status === 'in_progress'
   ).length
-  const openCount = items.length - doneCount - inProgressCount
-  const summary = `${items.length} tasks (${doneCount} done, ${inProgressCount} in progress, ${openCount} open)`
+  const openCount =
+    items.length -
+    completedCount -
+    cancelledCount -
+    inProgressCount
+  const summary =
+    `${items.length} tasks (${completedCount} done, ` +
+    `${inProgressCount} in progress, ${openCount} open` +
+    `${cancelledCount > 0 ? `, ${cancelledCount} cancelled` : ''})`
 
   return (
     <Box flexDirection="column" marginTop={0} paddingX={1}>
@@ -52,19 +69,21 @@ export function NexusTodoBlock({ todo }: Props): React.ReactNode {
       {items.map((item, i) => {
         const isTodoWrite = typeof item.id === 'string' && typeof item.content === 'string' && typeof item.status === 'string'
         const done = isTodoWrite
-          ? item.status === 'completed' || item.status === 'cancelled'
+          ? item.status === 'completed'
           : Boolean(item.done)
+        const cancelled = isTodoWrite && item.status === 'cancelled'
         const content = isTodoWrite ? (item.content ?? '') : (item.text ?? '')
         const inProgress = isTodoWrite && item.status === 'in_progress'
-        const icon = done ? '✔' : inProgress ? '◼' : '◻'
+        const icon = done ? '✔' : cancelled ? '✕' : inProgress ? '◼' : '◻'
 
         return (
           <Box key={item.id ?? i}>
             <Text dimColor>  </Text>
-            <Text color={done ? theme.success : inProgress ? theme.primary : undefined}>{icon} </Text>
+            <Text color={done ? theme.success : inProgress ? theme.primary : undefined} dimColor={cancelled}>{icon} </Text>
             <Text
               color={inProgress ? theme.text : done ? theme.text : theme.text}
-              dimColor={done}
+              dimColor={done || cancelled}
+              strikethrough={cancelled}
               bold={inProgress}
             >
               {content}

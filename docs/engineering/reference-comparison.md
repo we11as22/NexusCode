@@ -62,6 +62,7 @@ TypeScript-ядро для CLI, VS Code и сервера и заимствуе�
 | Цикл агента | Один авторитетный `runAgentLoop` и единый конвейер выполнения инструментов | Codex, OpenClaude | Реализовано; мёртвый дублирующий движок разрешений удалён |
 | Промпты и режимы | Agent, plan, ask, debug и review с отдельными промптами режимов и точной проекцией доступных возможностей | Codex, OpenClaude, Kilo, Roo | Реализовано и используется всеми интерфейсами; пользовательские инструкции режима не расширяют разрешения, PLAN допускает запись только в файл/процесс плана, а режим нельзя менять во время активного хода |
 | Plan workflow | Пять фаз исследования и проектирования, отдельный plan-файл, `PlanExit`, долговечный режим сессии и три явных решения пользователя: реализовать, доработать, выйти без реализации | OpenClaude, Kimi CLI, Kilo, MiMo | Реализовано одинаково в CLI и VS Code; запись текущего plan-файла не попадает в общий approval-тупик, `Esc` ничего не одобряет и сохраняет Plan, resume восстанавливает transcript и незавершённую карточку согласования, а явный выход сохраняет Agent и не поднимает старый Plan после reload |
+| Todo после Plan | Хост сразу материализует пункты принятого плана, а последующие обновления модели согласуются по видимому содержимому и состоянию; завершённый список исчезает из активной панели, но остаётся в transcript | OpenClaude, Kilo/OpenCode | Kilo хранит упорядоченное состояние без пользовательских ID и заменяет его транзакционно; OpenClaude восстанавливает последнее полное `TodoWrite` и очищает live-состояние после завершения. Nexus сохраняет совместимые внутренние ID, но не показывает их и не допускает дублей при смене ID моделью |
 | Построение контекста | Стабильные cacheable-блоки идентичности/правил и динамические блоки среды, памяти, задач, диагностик и mentions; настоящий последний user-turn остаётся последним сообщением | Codex, OpenClaude, Kimi CLI | Реализовано; служебная среда больше не подменяет последнюю реплику пользователя, а данные из mentions, памяти, инструментов и компакции явно отделены от инструкций |
 | Компакция | Порог от реального окна модели, микрокомпакция и ограниченное LLM-резюме старой головы с дословно сохранённым свежим хвостом, CAS-сохранение и непрерывность памяти | Codex, OpenClaude, Kilo, Kimi CLI, Qwen | Реализовано; автоматический порог — минимум из 85% окна и резерва 20k, бюджет summarizer зависит от модели, сбой не уничтожает диалог, а режим, активные навыки, задачи, memory/artifact-ссылки проецируются повторно |
 | Сессии | Защищённый контрольными суммами JSONL-транскрипт и встроенная SQLite-координация с транзакциями, восстановлением, миграциями и ограниченным активным контекстом | Codex, OpenCode, MiMo | Реализовано; JSONL остаётся переносимой историей, а SQLite управляет арендой, приёмом запросов, разрешениями, очередями, повторным воспроизведением и оркестрацией |
@@ -321,7 +322,7 @@ SQLite FTS/индекса не оправдано без измеренной п
 версии Node, изначально доступной в shell пользователя:
 
 - typecheck монорепозитория прошёл во всех шести исполняемых workspace-пакетах;
-- 1782 теста монорепозитория прошли в пакетах core, state, webview, CLI, server
+- 1840 тестов монорепозитория прошли в пакетах core, state, webview, CLI, server
   и VS Code;
 - полная production-сборка прошла, включая проверки импорта встроенной SQLite
   из `dist`;
@@ -334,7 +335,7 @@ SQLite FTS/индекса не оправдано без измеренной п
   кроссплатформенный компилятор пользовательских инструментов;
 - свежий VSIX установлен в настоящий VS Code, окно Extension Host
   перезагружено, а создание двух последовательных пустых сессий подтвердило
-  смену различимого короткого id без переноса истории предыдущего чата;
+  независимость истории без вывода технических идентификаторов пользователю;
 - в настоящем VS Code выполнен наблюдаемый сценарий Glob/Grep/Read/Bash,
   атомарный двухфайловый ApplyPatch, Edit, read-only субагент, очередь следующего
   хода, Review/Keep, а затем отдельный сценарий из двух Edit одного файла с
@@ -351,6 +352,14 @@ SQLite FTS/индекса не оправдано без измеренной п
 - реальный API smoke прошёл и в `--print` (`CLI_API_OK`), и в интерактивном Ink
   (`CLI_INTERACTIVE_OK`) с отключённой индексацией; в VS Code модельный контекст
   определился из каталога как `256.0k`, а не из старого fallback `128k`;
+- повторный production API smoke на финальной сборке вернул `API_OK`; единый
+  расчёт контекста использует provider usage как точку привязки, добавляет только
+  ещё не подтверждённый хвост и сохраняет источник `provider`/`hybrid`/
+  `estimated` вместе с сессией;
+- дополнительный финальный CLI smoke на установленной модели
+  `openai-compatible/kilo-auto/free` вернул `NEXUS_LIVE_API_OK` без инструментов
+  и файловых изменений; `doctor` подтвердил Node `24.18.0`, Git и ripgrep
+  `15.2.0` в тестовом workspace;
 - реальный CLI `--continue` восстановил transcript и незавершённый `PlanExit`,
   показал OpenClaude-подобную карточку `Ready to code?`, оставил Plan активным
   после `Esc`, сохранил явный выход без реализации как Agent и не поднял старую
@@ -363,12 +372,41 @@ SQLite FTS/индекса не оправдано без измеренной п
   вводом, варианты и custom-ответ находятся в одной карточке, а основной
   composer остаётся отдельным. Безопасный reference-запрос остановился на
   вопросе и не менял файлы;
+- на финальном VSIX вопросник показал ровно два заданных варианта и один
+  host-owned `Other`, принял custom-ответ и продолжил тот же turn без пустых
+  строк/вариантов; Plan revision сохранил режим Plan, а явный выход вернул
+  предыдущий Agent без создания целевого файла;
+- точный unified diff для нового файла появился **до** разрешения
+  (`1 + EXACT_PREVIEW`), `Allow` применил только предложенный файл, а `Undo`
+  удалил его и очистил панель изменений. Технические proposal/checkpoint hashes
+  не выводятся в обычном VS Code или CLI: интерфейсы используют названия,
+  `Checkpoint N`, `/sessions` и `nexus --continue`;
+- живой сценарий принятого Plan обнаружил и воспроизвёл дубли Todo при новых ID
+  модели. Исправление согласует пункты по нормализованному содержимому, сохраняет
+  максимум один `in_progress`, не мутирует список сверх лимита 100 и скрывает
+  полностью завершённую live-панель; существующий Todo сохраняется до явного
+  решения Plan follow-up и заменяется новым только после `Approve`;
+  регрессионные тесты проходят;
 - установленный VSIX повторно проверен на реальном сохранённом Plan-turn:
   соседние provider continuation с двумя `List` теперь отображаются одним
   блоком `Explored 2 lists`, без дублирующихся `Explored 1 list`; diff,
   reasoning и `PlanExit` сохранили хронологический порядок;
+- быстрый список сессий в финальном VSIX монтирует не более восьми строк и
+  отдельный переход в полную историю, при этом активная старая сессия остаётся
+  достижимой; пустые сессии показываются как `Untitled session`, без внутренних
+  ID;
+- Stock Ink в CLI теперь использует OpenClaude-подобное устойчивое окно живого
+  transcript: целевой хвост 200 строк, сдвигаемый после 50 строк запаса, вместо
+  перерисовки до 1000 React/Yoga-узлов на каждый spinner tick. Полная история
+  остаётся в долговечной сессии и terminal scrollback, а группировка
+  tool-use/result не разделяется;
 - loopback smoke-тест сервера проверил health, ошибку аутентификации и
   аутентифицированный список сессий в пределах workspace.
+- обе пользовательские команды установки проверены end-to-end: CLI-инсталлятор
+  нашёл Node `24.18.0`, даже когда первым в `PATH` был Node 20, установил
+  временный wrapper и прошёл `doctor`; extension-инсталлятор собрал все пакеты,
+  упаковал 168-файловый VSIX, нашёл обычный или macOS-translocated VS Code,
+  установил и подтвердил `nexuscode.nexuscode@0.1.0`.
 
 Для реальных запросов Nexus использовалась только настроенная бесплатная модель
 Kilo. Не выполнялись прямые платные запросы Nexus, разрушительное восстановление
@@ -445,7 +483,7 @@ Nexus объединяет возможности, которые обычно �
 | Цикл агента и выполнение инструментов | `source_projects/codex/codex-rs/core/src/tools/orchestrator.rs`; `source_projects/openclaude/src/tools/AgentTool/runAgent.ts`; `source_projects/kilocode/packages/core/src/session/runner/index.ts`; `source_projects/qwen-code/packages/core/src/agents/runtime/agent-core.ts` | `packages/core/src/agent/loop.ts`; `packages/core/src/agent/tool-pipeline.ts`; `packages/core/src/agent/tool-execution.ts`; `packages/core/src/agent/run-services.ts` |
 | Режим хода, Plan, очередь и проекция промпта | Codex `codex-rs/tui/src/chatwidget/input_flow.rs` и `interaction.rs`; OpenClaude `src/utils/messages/planMode.ts`, `src/tools/ExitPlanModeTool` и `src/components/permissions/ExitPlanModePermissionRequest`; Kilo `packages/opencode/src/session/prompt/plan-mode.txt` и `packages/opencode/src/cli/cmd/run/runtime.queue.ts`; Kimi CLI `src/kimi_cli/soul/dynamic_injections/plan_mode.py` и `src/kimi_cli/tools/plan`; MiMo `docs/compose/reports/plan-mode-edit-write-backstop.md` | `packages/core/src/agent/modes.ts`; `packages/core/src/agent/prompts/components/index.ts`; `packages/core/src/session/plan-write-gate.ts`; `packages/core/src/session/plan-followup.ts`; `packages/core/src/session/storage.ts`; `packages/vscode/src/controller.ts`; `packages/vscode/webview-ui/src/stores/chat.ts`; `packages/cli/src/screens/REPL.tsx` |
 | Лента VS Code, автоскролл и live/snapshot reconciliation | Kilo `packages/ui/src/hooks/create-auto-scroll.tsx` и `packages/kilo-vscode/webview-ui/src/components/chat/MessageList.tsx`; Codex item/message identity; OpenClaude streaming refs; Roo `webview-ui` Virtuoso lifecycle как пример сложности, которую не следует переносить без необходимости | `packages/vscode/webview-ui/src/components/MessageList.tsx`; `packages/vscode/webview-ui/src/components/native-scroll-policy.ts`; `packages/vscode/webview-ui/src/transcript/helpers.ts`; `packages/vscode/webview-ui/src/stores/chat.ts`; соответствующие тесты рядом |
-| Потоковый TUI, очередь и ограничение перерисовок | Codex `codex-rs/tui/src/streaming/controller.rs`; Kimi Code `apps/kimi-code/src/tui/controllers/streaming-ui.ts` и `editor-keyboard.ts`; Qwen Code `packages/cli/src/ui/hooks/useGeminiStream.ts` и `utils/MarkdownDisplay.tsx` | `packages/cli/src/nexus-message-projection.ts`; `packages/cli/src/prompt-queue.ts`; `packages/cli/src/cancel-policy.ts`; `packages/cli/src/event-waiter.ts`; `packages/cli/src/components/Spinner.tsx`; `packages/cli/src/screens/REPL.tsx` |
+| Потоковый TUI, очередь и ограничение перерисовок | Codex `codex-rs/tui/src/streaming/controller.rs`; OpenClaude `src/components/Messages.tsx` и `VirtualMessageList.tsx`; Kimi Code `apps/kimi-code/src/tui/controllers/streaming-ui.ts` и `editor-keyboard.ts`; Qwen Code `packages/cli/src/ui/hooks/useGeminiStream.ts` и `utils/MarkdownDisplay.tsx` | `packages/cli/src/nexus-message-projection.ts`; `packages/cli/src/cli-render-window.ts`; `packages/cli/src/prompt-queue.ts`; `packages/cli/src/cancel-policy.ts`; `packages/cli/src/event-waiter.ts`; `packages/cli/src/components/Spinner.tsx`; `packages/cli/src/screens/REPL.tsx` |
 | Компакция | `source_projects/codex/codex-rs/core/src/compact.rs`; `source_projects/kilocode/packages/core/src/session/compaction.ts`; `source_projects/kimi-cli/src/kimi_cli/soul/compaction.py` | `packages/core/src/session/compaction.ts`; `packages/core/src/context/compaction-projection.ts` |
 | Песочница и разрешения | `source_projects/codex/codex-rs/core/src/tools/sandboxing.rs`; `source_projects/codex/codex-rs/core/src/tools/approvals.rs`; `source_projects/kilocode/packages/core/src/permission.ts`; `source_projects/MiMo-Code/SECURITY.md` | `packages/core/src/agent/approval-coordinator.ts`; `packages/core/src/agent/mode-input-policy.ts`; `packages/core/src/agent/tool-execution.ts`; реализации хостов в `packages/cli/src/host.ts`, `packages/vscode/src/host.ts` и `packages/server/src/host.ts` |
 | Субагенты и оркестрация | `source_projects/codex/codex-rs/core/src/tools/handlers/multi_agents.rs`; `source_projects/openclaude/src/tools/AgentTool`; `source_projects/kimi-cli/src/kimi_cli/subagents`; `source_projects/qwen-code/packages/core/src/agents/runtime` | `packages/core/src/agent/parallel.ts`; `packages/core/src/orchestration/runtime.ts`; `packages/core/src/orchestration/agents.ts`; `packages/core/src/tools/built-in/orchestration-tools.ts` |

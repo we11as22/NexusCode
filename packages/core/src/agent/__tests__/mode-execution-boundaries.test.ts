@@ -536,6 +536,78 @@ describe("runtime mode boundaries", () => {
     ).toBe(false)
   })
 
+  it("preserves the current todo until the user decides the Plan follow-up", async () => {
+    const client = {
+      providerName: "test",
+      modelId: "test-model",
+      async *stream() {
+        yield {
+          type: "tool_call" as const,
+          toolCallId: "ready-plan-exit",
+          toolName: "PlanExit",
+          toolInput: { summary: "Plan is ready for review." },
+        }
+        yield {
+          type: "finish" as const,
+          finishReason: "tool_calls" as const,
+        }
+      },
+      supportsStructuredOutput: () => false,
+      getModel: () => ({}),
+    } as unknown as LLMClient
+    const cwd = process.cwd()
+    const host = createFakeHost({ cwd })
+    const session = createFakeSession(cwd)
+    const existingTodo = JSON.stringify([
+      {
+        id: "existing",
+        content: "Keep the current milestone",
+        status: "in_progress",
+      },
+    ])
+    session.updateTodo(existingTodo)
+    session.addMessage({ role: "user", content: "plan the next change" })
+    session.addMessage({
+      role: "assistant",
+      content: [{
+        type: "tool",
+        id: "plan-write",
+        tool: "Write",
+        status: "completed",
+        input: { file_path: ".nexus/plans/next-change.md" },
+        output: "Plan written.",
+      }],
+    })
+
+    await runAgentLoop({
+      session,
+      executionIdentity: {
+        workspaceId: "test-workspace",
+        sessionId: session.id,
+        turnId: "test-turn",
+        runId: "test-run",
+      },
+      client,
+      host,
+      config: createTestConfig(),
+      services: createNexusRunServices({
+        orchestrationRuntime: orchestrationRuntime as never,
+      }),
+      mode: "plan",
+      tools: [new ToolRegistry().get("PlanExit")!],
+      skills: [],
+      rulesContent: "",
+      compaction: createCompaction(),
+      signal: new AbortController().signal,
+    })
+
+    expect(session.getTodo()).toBe(existingTodo)
+    expect(host.events).not.toContainEqual({
+      type: "todo_updated",
+      todo: "",
+    })
+  })
+
   it("does not treat a rejected explicit PlanExit as turn completion", async () => {
     let streamCalls = 0
     const client = {

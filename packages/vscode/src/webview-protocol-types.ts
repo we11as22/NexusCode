@@ -14,6 +14,8 @@ export type WebviewMessage =
       type: "newMessage"
       clientMessageId: string
       content: string
+      /** Bounded user-facing projection when content contains injected context. */
+      displayText?: string
       mode: Mode
       mentions?: string
       images?: Array<{ data: string; mimeType: string }>

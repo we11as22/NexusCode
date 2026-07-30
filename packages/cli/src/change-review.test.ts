@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import {
   formatChangeReview,
+  formatChangeResolution,
   resolveChangeReviewSelection,
   type CliChangeReviewItem,
 } from "./change-review.js"
@@ -43,11 +44,23 @@ describe("CLI durable change review", () => {
     ).toThrow(/ambiguous/i)
   })
 
-  it("renders bounded actionable review instructions", () => {
-    expect(formatChangeReview(items)).toContain(
-      "/accept <number|id>",
-    )
-    expect(formatChangeReview(items)).toContain("src/b.ts, src/c.ts")
+  it("renders numbered file-oriented review instructions without opaque ids", () => {
+    const output = formatChangeReview(items)
+    expect(output).toContain("/accept <number>")
+    expect(output).toContain("2. (+4 -0) src/b.ts, src/c.ts")
+    expect(output).not.toContain(items[0]!.changeSetId)
+    expect(output).not.toContain(items[1]!.changeSetId)
     expect(formatChangeReview([], true)).toMatch(/no applied/i)
+  })
+
+  it("describes accepted and reverted changes by files, never internal ids", () => {
+    const accepted = formatChangeResolution(items[0]!, "accept")
+    const reverted = formatChangeResolution(items[1]!, "revert")
+
+    expect(accepted).toBe("Accepted change: src/a.ts.")
+    expect(reverted).toBe(
+      "Reverted change and restored the exact prior file state: src/b.ts, src/c.ts.",
+    )
+    expect(`${accepted}\n${reverted}`).not.toMatch(/aaaaaaaa|bbbbbbbb/)
   })
 })

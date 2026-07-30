@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest"
 
 import type { ToolPart } from "../stores/chat.js"
-import { buildFileChangePreview } from "./fileChangePreview.js"
+import {
+  buildFileChangePreview,
+  withPendingApprovalPreview,
+} from "./fileChangePreview.js"
 
 function part(overrides: Partial<ToolPart>): ToolPart {
   return {
@@ -120,6 +123,64 @@ describe("buildFileChangePreview", () => {
       { type: "add", lineNum: 2, line: "GAMMA" },
     ])
     expect(preview.statusOnly).toBe(false)
+  })
+
+  it("projects the authoritative approval diff before a new file is written", () => {
+    const projected = withPendingApprovalPreview(
+      part({
+        tool: "Write",
+        status: "running",
+        path: undefined,
+        diffStats: undefined,
+        diffHunks: undefined,
+      }),
+      {
+        type: "write",
+        tool: "Write",
+        description: "Write to fixture.txt",
+        path: "fixture.txt",
+        content: "UI_OK",
+        diffStats: { added: 1, removed: 0 },
+        diff:
+          "===================================================================\n" +
+          "--- fixture.txt\t\n" +
+          "+++ fixture.txt\t\n" +
+          "@@ -0,0 +1,1 @@\n" +
+          "+UI_OK\n" +
+          "\\ No newline at end of file\n",
+      },
+    )
+
+    expect(projected.path).toBe("fixture.txt")
+    expect(projected.diffStats).toEqual({ added: 1, removed: 0 })
+    expect(projected.diffHunks).toEqual([
+      { type: "add", lineNum: 1, line: "UI_OK" },
+    ])
+    expect(buildFileChangePreview(projected).statusOnly).toBe(false)
+  })
+
+  it("preserves completed exact hunks instead of replacing them from approval text", () => {
+    const projected = withPendingApprovalPreview(
+      part({
+        diffHunks: [
+          { type: "remove", lineNum: 2, line: "old" },
+          { type: "add", lineNum: 2, line: "new" },
+        ],
+      }),
+      {
+        type: "write",
+        tool: "Edit",
+        description: "Edit fixture.txt",
+        path: "fixture.txt",
+        diffStats: { added: 1, removed: 1 },
+        diff: "@@ -1,1 +1,1 @@\n-wrong\n+wrong",
+      },
+    )
+
+    expect(projected.diffHunks).toEqual([
+      { type: "remove", lineNum: 2, line: "old" },
+      { type: "add", lineNum: 2, line: "new" },
+    ])
   })
 
   it("rejects malformed hunks and reports the full hidden count", () => {

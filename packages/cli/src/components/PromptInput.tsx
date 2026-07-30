@@ -65,8 +65,6 @@ type Props = {
   nexusModel?: string
   /** Current Nexus index state shown in footer status line. */
   nexusIndexEnabled?: boolean
-  /** Current Nexus session id shown in footer status line. */
-  nexusSessionId?: string
   /** Live Nexus context usage from core (includes system prompt/runtime state). */
   nexusContextUsage?: {
     usedTokens: number
@@ -101,20 +99,18 @@ type Props = {
   nexusListCheckpoints?: () => Promise<
     Array<{ hash: string; ts: number; description?: string }>
   >
-  /** Restore session/workspace to a checkpoint by id (1-based index or hash prefix). */
+  /** Restore session/workspace to a checkpoint by its 1-based displayed number. */
   onNexusCheckpointRestore?: (
     checkpointId: string,
     restoreType: RestoreType,
   ) => Promise<{ ok: true } | { ok: false; error: string }>
   /** When set (Nexus), /compact triggers core compaction. */
   onNexusCompact?: () => Promise<void>
-  /** Handle post-plan followup choices (1/2/3/4/custom). Return true if consumed. */
-  onNexusPlanFollowupSubmit?: (input: string) => Promise<boolean>
   /** Toggle expanded/collapsed tool input details in chat. */
   onToggleToolDetails?: () => void
   /** Current expanded/collapsed state for tool input details. */
   toolDetailsExpanded?: boolean
-  /** Toggle session diff panel (Ctrl+I). */
+  /** Toggle session diff panel (local `/diff` command). */
   onToggleSessionDiffPanel?: () => void
   /** Current state of session diff panel visibility. */
   sessionDiffPanelVisible?: boolean
@@ -174,7 +170,6 @@ function PromptInput({
   onCycleNexusMode,
   nexusModel,
   nexusIndexEnabled,
-  nexusSessionId,
   nexusContextUsage,
   nexusAutoApprove,
   onToggleNexusAutoApproveAction,
@@ -184,7 +179,6 @@ function PromptInput({
   nexusListCheckpoints,
   onNexusCheckpointRestore,
   onNexusCompact,
-  onNexusPlanFollowupSubmit,
   onToggleToolDetails,
   toolDetailsExpanded = false,
   onToggleSessionDiffPanel,
@@ -422,15 +416,6 @@ function PromptInput({
       return
     }
 
-    if (!queuedPrompt && onNexusPlanFollowupSubmit) {
-      const consumed = await onNexusPlanFollowupSubmit(input)
-      if (consumed) {
-        onInputChange('')
-        addToHistory(input.trim())
-        resetHistory()
-        return
-      }
-    }
     if (
       !queuedPrompt &&
       suggestions.length > 0 &&
@@ -836,14 +821,6 @@ Create a .md rule file with a descriptive name. The rule file should define clea
     }
     if (
       key.ctrl &&
-      (inputChar === 'i' || inputChar === 'I' || inputChar === '\t') &&
-      onToggleSessionDiffPanel
-    ) {
-      onToggleSessionDiffPanel()
-      return
-    }
-    if (
-      key.ctrl &&
       (inputChar === 'k' || inputChar === 'K' || inputChar === '\x0b')
     ) {
       onModeChange(mode === 'bash' ? 'prompt' : 'bash')
@@ -888,11 +865,6 @@ Create a .md rule file with a descriptive name. The rule file should define clea
       ? `ctx ${Math.min(100, Math.round(nexusContextUsage.percent))}%`
       : `ctx ${formatCompactTokens(nexusContextUsage.usedTokens)}/—`
     : `ctx ${Math.min(100, Math.round((tokenUsage / MAX_TOKENS) * 100))}%`
-  const displaySessionId =
-    nexusSessionId && nexusSessionId.length > 12
-      ? `…${nexusSessionId.slice(-8)}`
-      : nexusSessionId
-
   const createScopeOptions = ['Create global (~/.nexus/)', 'Create local (.nexus/)', 'Cancel']
 
   return (
@@ -1015,7 +987,6 @@ Create a .md rule file with a descriptive name. The rule file should define clea
               {undoPanel.entries.map((e, i) => {
                 const idx = i + 1
                 const sel = undoPanel.selectedIndex === idx
-                const short = e.hash.slice(0, 7)
                 const when = new Date(e.ts).toLocaleString(undefined, {
                   dateStyle: 'short',
                   timeStyle: 'short',
@@ -1024,7 +995,7 @@ Create a .md rule file with a descriptive name. The rule file should define clea
                 return (
                   <Box key={`${e.hash}-${i}`} height={1}>
                     <Text color={sel ? theme.primary : undefined}>
-                      {sel ? '▶' : ' '} #{idx} {short} · {when}
+                      {sel ? '▶' : ' '} Checkpoint #{idx} · {when}
                       {desc ? ` — ${desc}` : ''}
                     </Text>
                   </Box>
@@ -1080,9 +1051,6 @@ Create a .md rule file with a descriptive name. The rule file should define clea
             {nexusIndexEnabled != null
               ? ` · index=${nexusIndexEnabled ? 'on' : 'off'}`
               : ''}
-            {displaySessionId != null
-              ? ` · session=${displaySessionId}`
-              : ''}
           </Text>
         </Box>
       )}
@@ -1100,7 +1068,7 @@ Create a .md rule file with a descriptive name. The rule file should define clea
                 ? `Press ${exitMessage.key} again to exit`
                 : message.show
                   ? message.text
-                  : `! bash · / cmd · Esc undo · Ctrl+O output:${toolOutputsVisible ? 'on' : 'off'} · Ctrl+I diff:${sessionDiffPanelVisible ? 'on' : 'off'} · ${compactContextFooterText}`}
+                  : `! bash · / cmd · Esc undo · Ctrl+O output:${toolOutputsVisible ? 'on' : 'off'} · /diff:${sessionDiffPanelVisible ? 'on' : 'off'} · ${compactContextFooterText}`}
             </Text>
           </Box>
           <TokenWarning tokenUsage={tokenUsage} />
@@ -1131,7 +1099,7 @@ Create a .md rule file with a descriptive name. The rule file should define clea
                 <Text dimColor>
                   · / for commands · esc to undo · Ctrl+O tools:{' '}
                   {toolDetailsExpanded ? 'expanded' : 'collapsed'} · outputs:{' '}
-                  {toolOutputsVisible ? 'visible' : 'hidden'} · Ctrl+I diff:{' '}
+                  {toolOutputsVisible ? 'visible' : 'hidden'} · /diff:{' '}
                   {sessionDiffPanelVisible ? 'shown' : 'hidden'}
                 </Text>
               </>

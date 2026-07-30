@@ -7,6 +7,7 @@ import {
   createFakeSession,
   createTestConfig,
 } from "../../test/fakes.js"
+import { askFollowupTool } from "../../tools/built-in/report-and-control.js"
 import { runAgentLoop } from "../loop.js"
 import { createNexusRunServices } from "../run-services.js"
 
@@ -126,5 +127,62 @@ describe("agent run persistence boundary", () => {
 
     await expect(runWithSession(session, host)).rejects.toBe(failure)
     expect(host.events.some((event) => event.type === "done")).toBe(false)
+  })
+
+  it("preserves task progress when a questionnaire pauses the turn", async () => {
+    const cwd = process.cwd()
+    const host = createFakeHost({ cwd })
+    const session = createFakeSession(cwd)
+    session.addMessage({ role: "user", content: "ask for the missing choice" })
+    session.updateTodo(JSON.stringify([
+      { id: "design", content: "Finish design", status: "in_progress" },
+    ]))
+    const todoBefore = session.getTodo()
+    const client = {
+      providerName: "test",
+      modelId: "test-model",
+      async *stream() {
+        yield {
+          type: "tool_call" as const,
+          toolCallId: "question-1",
+          toolName: "AskFollowupQuestion",
+          toolInput: {
+            question: "Which target?",
+            options: ["Workspace", "Package"],
+            allow_custom: false,
+          },
+        }
+        yield { type: "finish" as const, finishReason: "tool_calls" as const }
+      },
+      supportsStructuredOutput: () => false,
+      getModel: () => ({}),
+    } as unknown as LLMClient
+
+    await runAgentLoop({
+      session,
+      executionIdentity: {
+        workspaceId: "test-workspace",
+        sessionId: session.id,
+        turnId: "question-turn",
+        runId: "question-run",
+      },
+      client,
+      host,
+      config: createTestConfig({
+        memory: { sessionMemoryEnabled: false },
+      }),
+      services: createNexusRunServices({
+        orchestrationRuntime: orchestrationRuntime as never,
+      }),
+      mode: "agent",
+      tools: [askFollowupTool],
+      skills: [],
+      rulesContent: "",
+      compaction: createCompaction(),
+      signal: new AbortController().signal,
+    })
+
+    expect(host.events.some((event) => event.type === "question_request")).toBe(true)
+    expect(session.getTodo()).toBe(todoBefore)
   })
 })

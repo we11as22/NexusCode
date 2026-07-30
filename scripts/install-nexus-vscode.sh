@@ -66,6 +66,25 @@ find_code() {
     done
   fi
 
+  # A downloaded app can be launched by Gatekeeper from a per-user,
+  # read-only App Translocation directory. Spotlight often omits that runtime
+  # copy, so inspect only this process user's temporary AppTranslocation root.
+  if [ -n "${TMPDIR:-}" ]; then
+    TRANSLOCATION_ROOT="${TMPDIR%/}/AppTranslocation"
+    if [ -d "$TRANSLOCATION_ROOT" ]; then
+      TRANSLOCATED_CODE="$(
+        find "$TRANSLOCATION_ROOT" \
+          -path "*/Visual Studio Code.app/Contents/Resources/app/bin/code" \
+          -type f -print 2>/dev/null |
+          sed -n '1p'
+      )"
+      if [ -n "$TRANSLOCATED_CODE" ] && [ -x "$TRANSLOCATED_CODE" ]; then
+        echo "$TRANSLOCATED_CODE"
+        return
+      fi
+    fi
+  fi
+
   for candidate in \
     "$(command -v code-insiders 2>/dev/null)" \
     "/Applications/Visual Studio Code - Insiders.app/Contents/Resources/app/bin/code" \

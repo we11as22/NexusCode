@@ -2,12 +2,67 @@ import { describe, expect, it, vi } from "vitest"
 import type { LLMClient } from "../provider/types.js"
 import { createFakeSession } from "../test/fakes.js"
 import {
+  DEFAULT_MAX_ACTIVE_MESSAGES,
+  HARD_MAX_ACTIVE_MESSAGES,
   compactSessionAndPersist,
   createCompaction,
+  getActiveMessageCompactionPressure,
 } from "./compaction.js"
 import { getMessagesForActiveContext } from "./active-context.js"
 
 describe("session compaction boundaries", () => {
+  it("bounds active tiny-message histories independently of token estimates", () => {
+    const makeMessages = (count: number) =>
+      Array.from({ length: count }, (_, index) => ({
+        id: `m-${index}`,
+        role: index % 2 === 0 ? "user" as const : "assistant" as const,
+        content: "x",
+        ts: index,
+      }))
+
+    expect(
+      getActiveMessageCompactionPressure(
+        makeMessages(DEFAULT_MAX_ACTIVE_MESSAGES),
+      ),
+    ).toBeNull()
+    expect(
+      getActiveMessageCompactionPressure(
+        makeMessages(DEFAULT_MAX_ACTIVE_MESSAGES + 1),
+      ),
+    ).toBe("soft")
+    expect(
+      getActiveMessageCompactionPressure(
+        makeMessages(HARD_MAX_ACTIVE_MESSAGES + 1),
+      ),
+    ).toBe("hard")
+  })
+
+  it("counts only messages after the latest durable summary boundary", () => {
+    const messages = [
+      ...Array.from({ length: HARD_MAX_ACTIVE_MESSAGES + 1 }, (_, index) => ({
+        id: `old-${index}`,
+        role: "user" as const,
+        content: "old",
+        ts: index,
+      })),
+      {
+        id: "summary",
+        role: "user" as const,
+        content: "summary",
+        summary: true,
+        ts: HARD_MAX_ACTIVE_MESSAGES + 1,
+      },
+      {
+        id: "recent",
+        role: "user" as const,
+        content: "recent",
+        ts: HARD_MAX_ACTIVE_MESSAGES + 2,
+      },
+    ]
+
+    expect(getActiveMessageCompactionPressure(messages)).toBeNull()
+  })
+
   it("uses the model-window percentage capped by the response reserve", () => {
     const compaction = createCompaction()
 

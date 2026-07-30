@@ -537,6 +537,8 @@ export interface ISession {
   getMode(): Mode | undefined
   /** Persistable execution mode selected by the host or admitted user turn. */
   setMode(mode: Mode): void
+  /** Durable mode captured immediately before entering Plan. */
+  getPlanReturnMode?(): Exclude<Mode, "plan"> | undefined
   addMessage(
     msg: Omit<SessionMessage, "id" | "ts">,
     identity?: { id?: string; ts?: number },

@@ -88,8 +88,10 @@ import { applyCheckpointRestore, type RestoreType } from '../task-restore.js'
 import type { SessionMessage, ToolPart } from '@nexuscode/core'
 import {
   ChangeSetService,
+  approvedPlanTodo,
   compactSessionAndPersist,
   createLLMClient,
+  deriveSessionTitle,
   exactChangeHunkDiffStats,
   exactLineDiffStats,
   finalizeConfigCredentials,
@@ -97,6 +99,7 @@ import {
 } from '@nexuscode/core'
 import {
   formatChangeReview,
+  formatChangeResolution,
   resolveChangeReviewSelection,
   type CliChangeReviewItem,
 } from '../change-review.js'
@@ -133,6 +136,10 @@ import {
   canShowPrimarySpinner,
   canShowPromptInput,
 } from './prompt-visibility.js'
+import {
+  computeCliRenderWindowStart,
+  type CliRenderWindowAnchor,
+} from '../cli-render-window.js'
 
 type MessageRenderItem = {
   key: string
@@ -278,6 +285,21 @@ function getUserPromptFromMessage(m: MessageType): string {
       .trim()
   }
   return ''
+}
+
+function getUserDisplayPromptFromMessage(m: MessageType): string {
+  if (m.type !== 'user') return ''
+  const content = m.message.content
+  if (typeof content === 'string') return content.trim()
+  if (!Array.isArray(content)) return ''
+  return content
+    .map((block) => {
+      if (block.type !== 'text') return ''
+      const text = block as { text: string; user_message?: string }
+      return text.user_message?.trim() || text.text
+    })
+    .join('')
+    .trim()
 }
 
 export type BinaryFeedbackContext = {
@@ -441,7 +463,7 @@ export function REPL({
   const [toolOutputsVisible, setToolOutputsVisible] = useState<boolean>(
     () => getGlobalConfig().showToolOutputs ?? false,
   )
-  /** Session diff panel visibility (default hidden). Toggle with Ctrl+I. */
+  /** Session diff panel visibility (default hidden). Toggle with `/diff`. */
   const [sessionDiffExpanded, setSessionDiffExpanded] = useState(false)
   /** Plan mode follow-up panel (Ready to code?). */
   const [nexusPlanFollowup, setNexusPlanFollowup] = useState<{
@@ -575,7 +597,7 @@ export function REPL({
             )
           if (resolved.proposalHash !== item.proposalHash) {
             throw new Error(
-              "The server resolved a different durable proposal hash.",
+              "The proposed change changed while it was being resolved. Refresh the change list and try again.",
             )
           }
         }
@@ -642,7 +664,7 @@ export function REPL({
             : await service.revert(item.changeSetId)
           if (resolved.proposalHash !== item.proposalHash) {
             throw new Error(
-              "The local store resolved a different durable proposal hash.",
+              "The proposed change changed while it was being resolved. Refresh the change list and try again.",
             )
           }
           const expectedState =
@@ -667,11 +689,7 @@ export function REPL({
       await resolveOne(selected, action)
       setMessages(prev => [
         ...prev,
-        createAssistantMessage(
-          action === 'accept'
-            ? `Accepted ${selected.changeSetId.slice(0, 12)}: ${selected.paths.join(', ')}.`
-            : `Reverted ${selected.changeSetId.slice(0, 12)} and restored the exact prior file state: ${selected.paths.join(', ')}.`,
-        ),
+        createAssistantMessage(formatChangeResolution(selected, action)),
       ])
     } catch (error) {
       setMessages(prev => [
@@ -879,8 +897,7 @@ export function REPL({
       setMessages([
         ...rebuilt,
         createAssistantMessage(
-          `${modeLabel} restored to checkpoint #${checkpointId} ` +
-          `(${result.hash.slice(0, 7)}). ` +
+          `${modeLabel} restored to checkpoint #${checkpointId}. ` +
           `${result.revertedChangeSets} Nexus-owned change set(s) reverted; ` +
           "manual, accepted, ignored, and nested-repository changes were preserved.",
         ),
@@ -985,7 +1002,12 @@ export function REPL({
   }, [])
 
   const runNexusFollowupPrompt = useCallback(
-    async (prompt: string, resetSession: boolean, modeOverride: string) => {
+    async (
+      prompt: string,
+      resetSession: boolean,
+      modeOverride: string,
+      displayPrompt?: string,
+    ) => {
       if (!nexusBootstrap) return
       if (resetSession) {
         nexusBootstrap.session = Session.create(nexusBootstrap.cwd)
@@ -1001,7 +1023,17 @@ export function REPL({
           {
             type: 'user',
             uuid: `followup_${Date.now()}`,
-            message: { role: 'user', content: prompt },
+            message: {
+              role: 'user',
+              content:
+                displayPrompt?.trim() && displayPrompt.trim() !== prompt.trim()
+                  ? [{
+                      type: 'text',
+                      text: prompt,
+                      user_message: displayPrompt.trim(),
+                    }]
+                  : prompt,
+            },
           },
         ] as MessageType[],
         abortController,
@@ -1013,36 +1045,15 @@ export function REPL({
   const runNexusQuestionPrompt = useCallback(async (answers: Array<{ questionId: string; optionId?: string; optionLabel?: string; customText?: string }>) => {
     if (!nexusQuestionRequest) return
     const prompt = formatQuestionnaireAnswersForAgent(nexusQuestionRequest, answers)
+    const displayPrompt = prompt.replace(/^\[nexus:questionnaire-response\]\n/, '')
     setNexusQuestionRequest(null)
-    await runNexusFollowupPrompt(prompt, false, nexusModeOverride)
+    await runNexusFollowupPrompt(
+      prompt,
+      false,
+      nexusModeOverride,
+      displayPrompt,
+    )
   }, [nexusQuestionRequest, nexusModeOverride, runNexusFollowupPrompt])
-
-  const handleNexusPlanFollowupInput = useCallback(
-    async (input: string): Promise<boolean> => {
-      if (!nexusPlanFollowup) return false
-      const trimmed = input.trim()
-      if (!trimmed) return true
-      const planText = nexusPlanFollowup.planText
-      const implementationPrompt = `Implement the following plan:\n\n${planText}`
-      if (trimmed === '1') {
-        setNexusPlanFollowup(null)
-        await runNexusFollowupPrompt(implementationPrompt, false, 'agent')
-        return true
-      }
-      if (trimmed === '2') {
-        return true
-      }
-      const customInstruction = trimmed
-      setNexusPlanFollowup(null)
-      await runNexusFollowupPrompt(
-        `Revise the current implementation plan based on this feedback.\n\nCurrent plan:\n${planText}\n\nUser feedback / requested changes:\n${customInstruction}\n\nDo not implement the code. Update the plan file in .nexus/plans/ and call PlanExit again when the revised plan is ready.`,
-        false,
-        'plan',
-      )
-      return true
-    },
-    [nexusPlanFollowup, runNexusFollowupPrompt],
-  )
 
   const getNexusModeForUserMessage = useCallback(
     (message: MessageType, queuedMode?: string): string => {
@@ -1308,6 +1319,10 @@ export function REPL({
 
       if (nexusBootstrap) {
         const userPrompt = newMessages.map(getUserPromptFromMessage).filter(Boolean).join('\n') || ''
+        const userDisplayPrompt = newMessages
+          .map(getUserDisplayPromptFromMessage)
+          .filter(Boolean)
+          .join('\n')
         if (!userPrompt) {
           setIsLoading(false)
           return
@@ -1318,6 +1333,9 @@ export function REPL({
         for await (const message of queryNexus({
           nexus: nexusBootstrap,
           userPrompt,
+          ...(userDisplayPrompt && userDisplayPrompt !== userPrompt
+            ? { userDisplayPrompt }
+            : {}),
           repoTools: tools,
           signal: abortController.signal,
           autoApprove: !!dangerouslySkipPermissions,
@@ -1493,6 +1511,7 @@ export function REPL({
 
     if (nexusBootstrap) {
       const userPrompt = getUserPromptFromMessage(lastMessage)
+      const userDisplayPrompt = getUserDisplayPromptFromMessage(lastMessage)
       if (!userPrompt) {
         setIsLoading(false)
         return
@@ -1504,6 +1523,9 @@ export function REPL({
       for await (const message of queryNexus({
         nexus: nexusBootstrap,
         userPrompt,
+        ...(userDisplayPrompt && userDisplayPrompt !== userPrompt
+          ? { userDisplayPrompt }
+          : {}),
         repoTools: tools,
         signal: abortController.signal,
         autoApprove: !!dangerouslySkipPermissions,
@@ -1622,14 +1644,12 @@ export function REPL({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Print resume hint on exit when in Nexus mode
+  // Print a human-facing resume hint without leaking opaque storage ids.
   useEffect(() => {
     return () => {
       if (nexusSessionId) {
         process.stdout.write(
-          '\nResume this session with:\nnexus --session ' +
-            nexusSessionId +
-            '\n',
+          '\nResume your latest session with:\nnexus --continue\n',
         )
       }
     }
@@ -1665,14 +1685,13 @@ export function REPL({
     )
     setNexusTodo(nexusBootstrap.session.getTodo())
     setForkNumber(n => n + 1)
-    const sid =
-      nexusSessionId.length > 24
-        ? `${nexusSessionId.slice(0, 10)}…${nexusSessionId.slice(-6)}`
-        : nexusSessionId
+    const sessionTitle =
+      deriveSessionTitle(nexusBootstrap.session.messages).trim() ||
+      'Untitled session'
     setMessages([
       ...replMessagesFromSession(nexusBootstrap.session.messages),
       createAssistantMessage(
-        `Switched session · ${sid}\nCLI resume: nexus --session ${nexusSessionId}`,
+        `Switched session · ${sessionTitle}\nResume later with: nexus --continue`,
       ),
     ])
     void resumeActiveRemoteTurn()
@@ -1691,7 +1710,9 @@ export function REPL({
     nexusBootstrap.session.setMode(mode)
     if (nexusBootstrap.serverUrl && nexusBootstrap.remoteClient) {
       void nexusBootstrap.remoteClient
-        .setSessionMode(nexusSessionId, mode)
+        .setSessionMode(nexusSessionId, mode, {
+          todo: nexusBootstrap.session.getTodo(),
+        })
         .catch((error) => {
           setNexusBannerText(
             `Could not persist session mode: ${
@@ -1956,7 +1977,25 @@ export function REPL({
   const shouldHideNexusHeader =
     nexusBootstrap != null && inputValue.trimStart().startsWith('/')
 
-  /** Single chronological list (no Static/transient split): splitting froze history above live rows so tool results appeared above their tool_use lines. */
+  const renderWindowAnchorRef = useRef<CliRenderWindowAnchor>(null)
+  const renderWindowStart = computeCliRenderWindowStart(
+    messagesJSX.map((item) => item.key),
+    renderWindowAnchorRef,
+  )
+  const visibleMessagesJSX = useMemo(
+    () =>
+      renderWindowStart > 0
+        ? messagesJSX.slice(renderWindowStart)
+        : messagesJSX,
+    [messagesJSX, renderWindowStart],
+  )
+
+  /**
+   * Single chronological list (no Static/transient split): splitting froze
+   * history above live rows so tool results appeared above their tool_use
+   * lines. The whole list uses OpenClaude's stable non-virtualized render
+   * window so Stock Ink does not retain an unbounded React/Yoga tree.
+   */
   const chatMessagesSection = useMemo(
     () =>
       <>
@@ -1972,17 +2011,26 @@ export function REPL({
             <ProjectOnboarding workspaceDir={getOriginalCwd()} />
           </Box>
         ) : null}
-        {messagesJSX.map(item => (
+        {renderWindowStart > 0 ? (
+          <Box marginY={1}>
+            <Text dimColor>
+              Earlier activity remains in the saved session and terminal
+              scrollback.
+            </Text>
+          </Box>
+        ) : null}
+        {visibleMessagesJSX.map(item => (
           <React.Fragment key={item.key}>{item.jsx}</React.Fragment>
         ))}
       </>,
     [
       forkNumber,
       layoutRemountKey,
-      messagesJSX,
       mcpStatuses,
       isDefaultModel,
+      renderWindowStart,
       shouldHideNexusHeader,
+      visibleMessagesJSX,
     ],
   )
 
@@ -2109,11 +2157,25 @@ export function REPL({
                   planText={nexusPlanFollowup.planText}
                   onImplement={async () => {
                     const planText = nexusPlanFollowup.planText
+                    nexusBootstrap.session.updateTodo(approvedPlanTodo(planText))
+                    nexusBootstrap.session.setMode('agent')
+                    nexusBootstrap.mode = 'agent'
+                    if (nexusBootstrap.remoteClient) {
+                      await nexusBootstrap.remoteClient.setSessionMode(
+                        nexusBootstrap.session.id,
+                        'agent',
+                        { todo: nexusBootstrap.session.getTodo() },
+                      )
+                    } else {
+                      await nexusBootstrap.session.save()
+                    }
+                    setNexusTodo(nexusBootstrap.session.getTodo())
                     setNexusPlanFollowup(null)
                     await runNexusFollowupPrompt(
                       `Implement the following plan:\n\n${planText}`,
                       false,
                       'agent',
+                      'Implement this plan',
                     )
                   }}
                   onRevise={async (instruction) => {
@@ -2123,11 +2185,25 @@ export function REPL({
                       `Revise the current implementation plan based on this feedback.\n\nCurrent plan:\n${planText}\n\nUser feedback / requested changes:\n${instruction}\n\nDo not implement the code. Update the plan file in .nexus/plans/ and call PlanExit again when the revised plan is ready.`,
                       false,
                       'plan',
+                      `Revise plan → ${instruction}`,
                     )
                   }}
-                  onAbandon={() => {
+                  onAbandon={async () => {
+                    const returnMode =
+                      nexusBootstrap.session.getPlanReturnMode() ?? 'agent'
+                    nexusBootstrap.session.setMode(returnMode)
+                    nexusBootstrap.mode = returnMode
                     setNexusPlanFollowup(null)
-                    setNexusModeOverride('agent')
+                    setNexusModeOverride(returnMode)
+                    if (nexusBootstrap.remoteClient) {
+                      await nexusBootstrap.remoteClient.setSessionMode(
+                        nexusBootstrap.session.id,
+                        returnMode,
+                        { todo: nexusBootstrap.session.getTodo() },
+                      )
+                    } else {
+                      await nexusBootstrap.session.save()
+                    }
                   }}
                 />
               ) : null}
@@ -2171,7 +2247,6 @@ export function REPL({
                 nexusIndexEnabled={
                   nexusBootstrap ? !nexusNoIndex : undefined
                 }
-                nexusSessionId={nexusSessionId}
                 nexusContextUsage={nexusContextUsage}
                 onCycleNexusMode={
                   nexusBootstrap && !isLoading
@@ -2194,9 +2269,6 @@ export function REPL({
                   nexusBootstrap ? onNexusCheckpointRestore : undefined
                 }
                 onNexusCompact={nexusBootstrap ? onNexusCompact : undefined}
-                onNexusPlanFollowupSubmit={
-                  nexusBootstrap ? handleNexusPlanFollowupInput : undefined
-                }
                 onToggleToolDetails={undefined}
                 toolDetailsExpanded={toolDetailsExpanded}
                 onToggleToolOutputs={toggleToolPresentation}

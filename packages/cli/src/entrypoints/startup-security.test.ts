@@ -156,6 +156,7 @@ describe("CLI startup authority ordering", () => {
     expect(footer.match(/wrap=\"truncate-end\"/g)?.length ?? 0)
       .toBeGreaterThanOrEqual(2)
     expect(footer).toContain("Ctrl+O output:")
-    expect(footer).toContain("Ctrl+I diff:")
+    expect(footer).toContain("/diff:")
+    expect(footer).not.toContain("Ctrl+I")
   })
 })

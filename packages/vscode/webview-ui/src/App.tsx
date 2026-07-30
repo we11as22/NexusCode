@@ -20,11 +20,19 @@ import { RuntimeActivityPanel } from "./components/RuntimeActivityPanel.js"
 import { Questionnaire } from "./components/questionnaire/Questionnaire.js"
 import type { AutocompleteExtensionUiState, ExtensionMessage } from "./types/messages.js"
 import { confirmAsync, resolveConfirm, postMessage } from "./vscode.js"
-import { NEXUS_CUSTOM_OPTION_ID } from "./constants/questionnaire.js"
 import { MarketplacePanel } from "./components/marketplace/MarketplacePanel.js"
 import { createExtensionMessageBuffer } from "./bridge/message-buffer.js"
-import { formatSessionLabel } from "./utils/session-label.js"
-import { visibleSessionTabs } from "./components/session-tab-policy.js"
+import {
+  visibleSessionDropdown,
+  visibleSessionTabs,
+} from "./components/session-tab-policy.js"
+import {
+  SESSION_HISTORY_PAGE_SIZE,
+  visibleSessionHistory,
+} from "./components/session-history-policy.js"
+import { planKeyboardAction } from "./components/plan-keyboard-policy.js"
+import { ProjectAuthorityRequestCard } from "./components/ProjectAuthorityRequestCard.js"
+import { sessionDisplayTitle } from "./utils/session-label.js"
 
 const ICON_CLASS = "w-4 h-4 flex-shrink-0"
 const BTN_CLASS =
@@ -233,23 +241,6 @@ function ChatView() {
     )
   }
 
-  const contextColor =
-    store.contextLimitTokens > 0 && store.contextPercent >= 90
-      ? "text-red-400"
-      : store.contextLimitTokens > 0 && store.contextPercent >= 75
-        ? "text-yellow-300"
-        : "text-emerald-300"
-  const contextLabel =
-    store.contextLimitTokens > 0
-      ? `ctx ${formatTokens(store.contextUsedTokens)}/${formatTokens(store.contextLimitTokens)} (${store.contextPercent}%)`
-      : `ctx ${formatTokens(store.contextUsedTokens)}/—`
-  const contextTitle =
-    store.contextSource === "hybrid"
-      ? `${formatTokens(store.contextUsedTokens)} used of ${formatTokens(store.contextLimitTokens)}; ${formatTokens(store.contextProviderTokens ?? 0)} provider-reported + ${formatTokens(store.contextPendingTokens ?? 0)} estimated pending`
-      : store.contextLimitTokens > 0
-        ? `${formatTokens(store.contextUsedTokens)} used of ${formatTokens(store.contextLimitTokens)}`
-        : `${formatTokens(store.contextUsedTokens)} used; model context window is unknown`
-
   return (
     <>
       {store.awaitingApproval && !store.pendingApproval && (
@@ -261,20 +252,6 @@ function ChatView() {
 
       <div className="chat-view">
         <SessionTabBar />
-        <div className="nexus-status">
-          <span className="text-[10px] text-[var(--vscode-descriptionForeground)] truncate">
-            {store.provider}/{store.model}
-          </span>
-          <span className="text-[10px] text-[var(--vscode-descriptionForeground)] truncate">
-            session {formatSessionLabel(store.sessionId)}
-          </span>
-          <span
-            className={`text-[10px] ${contextColor} truncate`}
-            title={contextTitle}
-          >
-            {contextLabel}
-          </span>
-        </div>
         <div className="chat-messages-wrapper">
           <div className="chat-messages">
             <MessageList
@@ -303,450 +280,6 @@ function ChatView() {
         </div>
       </div>
     </>
-  )
-}
-
-type QuestionnaireOption = {
-  id: string
-  label: string
-  description?: string
-  preview?: string
-  isCustom: boolean
-}
-
-type QuestionnaireQuestion = {
-  id: string
-  question: string
-  header?: string
-  multiSelect?: boolean
-  options: Array<{ id: string; label: string; description?: string; preview?: string }>
-  allowCustom?: boolean
-}
-
-type QuestionnaireAnswer = {
-  optionId?: string
-  optionIds?: string[]
-  optionLabel?: string
-  optionLabels?: string[]
-  customText?: string
-}
-
-function questionnaireQuestionAnswered(item: QuestionnaireQuestion, answer?: QuestionnaireAnswer): boolean {
-  if (!answer) return false
-  if (answer.optionId === NEXUS_CUSTOM_OPTION_ID) return Boolean(answer.customText?.trim())
-  if (item.multiSelect) return Array.isArray(answer.optionIds) && answer.optionIds.length > 0
-  return Boolean(answer.optionId)
-}
-
-function QuestionnaireBar({
-  request,
-  onDismiss,
-  onSubmit,
-}: {
-  request: {
-    requestId: string
-    title?: string
-    submitLabel?: string
-    customOptionLabel?: string
-    questions: QuestionnaireQuestion[]
-  }
-  onDismiss: () => void
-  onSubmit: (answers: Array<{
-    questionId: string
-    optionId?: string
-    optionIds?: string[]
-    optionLabel?: string
-    optionLabels?: string[]
-    customText?: string
-  }>) => void
-}) {
-  const [questionIndex, setQuestionIndex] = useState(0)
-  const [selectedIndex, setSelectedIndex] = useState(0)
-  const [answers, setAnswers] = useState<Record<string, QuestionnaireAnswer>>({})
-  const question = request.questions[questionIndex]
-
-  const customLabel = request.customOptionLabel?.trim() || "Other"
-  const options: QuestionnaireOption[] = question
-    ? [
-        ...question.options.map((option) => ({
-          ...option,
-          isCustom: false as const,
-        })),
-        { id: NEXUS_CUSTOM_OPTION_ID, label: customLabel, isCustom: true as const },
-      ]
-    : []
-  const answeredCount = request.questions.filter((item) =>
-    questionnaireQuestionAnswered(item, answers[item.id]),
-  ).length
-  const allAnswered = answeredCount === request.questions.length && request.questions.length > 0
-  const activeAnswer = question ? answers[question.id] : undefined
-  const customMode = activeAnswer?.optionId === NEXUS_CUSTOM_OPTION_ID
-  const showKicker = Boolean(request.title && request.title.trim() && request.title !== "Asking questions")
-  const isMulti = Boolean(question?.multiSelect)
-  const focusedOption = options[selectedIndex]
-  const showPreview =
-    !isMulti &&
-    focusedOption &&
-    !focusedOption.isCustom &&
-    typeof focusedOption.preview === "string" &&
-    focusedOption.preview.trim().length > 0
-
-  const buildPayload = React.useCallback(
-    (nextAnswers: Record<string, QuestionnaireAnswer>) =>
-      request.questions.map((item) => {
-        const a = nextAnswers[item.id]
-        if (item.multiSelect) {
-          if (a?.optionId === NEXUS_CUSTOM_OPTION_ID) {
-            return {
-              questionId: item.id,
-              optionId: a.optionId,
-              optionLabel: a.optionLabel,
-              customText: a.customText,
-            }
-          }
-          const ids = a?.optionIds ?? []
-          const labels = ids
-            .map((id) => item.options.find((o) => o.id === id)?.label)
-            .filter((x): x is string => Boolean(x?.trim()))
-          return { questionId: item.id, optionIds: ids, optionLabels: labels }
-        }
-        return {
-          questionId: item.id,
-          optionId: a?.optionId,
-          optionLabel: a?.optionLabel,
-          customText: a?.customText,
-        }
-      }),
-    [request.questions],
-  )
-
-  const submitAnswers = React.useCallback(
-    (nextAnswers: typeof answers) => onSubmit(buildPayload(nextAnswers)),
-    [buildPayload, onSubmit],
-  )
-
-  React.useEffect(() => {
-    if (!question) return
-    const current = answers[question.id]
-    let idx = -1
-    if (question.multiSelect && current?.optionIds && current.optionIds.length > 0) {
-      idx = options.findIndex((option) => option.id === current.optionIds![0])
-    } else if (current?.optionId) {
-      idx = options.findIndex((option) => option.id === current.optionId)
-    }
-    setSelectedIndex(idx >= 0 ? idx : 0)
-  }, [answers, options, question])
-
-  React.useEffect(() => {
-    const everyAnswered = (next: Record<string, QuestionnaireAnswer>) =>
-      request.questions.every((item) => questionnaireQuestionAnswered(item, next[item.id]))
-
-    const onKey = (e: KeyboardEvent) => {
-      if (!question) return
-      if (e.key === "Escape") {
-        e.preventDefault()
-        if (customMode) {
-          setAnswers((prev) => ({
-            ...prev,
-            [question.id]: {
-              optionId: undefined,
-              optionLabel: undefined,
-              optionIds: undefined,
-              optionLabels: undefined,
-              customText: "",
-            },
-          }))
-          return
-        }
-        onDismiss()
-        return
-      }
-      if (customMode) {
-        if (e.key === "Enter" && !e.shiftKey) {
-          e.preventDefault()
-          const nextAnswers = {
-            ...answers,
-            [question.id]: {
-              optionId: NEXUS_CUSTOM_OPTION_ID,
-              optionLabel: customLabel,
-              customText: answers[question.id]?.customText ?? "",
-            },
-          }
-          if (!(nextAnswers[question.id]?.customText ?? "").trim()) return
-          if (questionIndex < request.questions.length - 1) {
-            setQuestionIndex((i) => Math.min(request.questions.length - 1, i + 1))
-            return
-          }
-          if (everyAnswered(nextAnswers)) {
-            submitAnswers(nextAnswers)
-          }
-        }
-        return
-      }
-      if (e.key === "ArrowLeft") {
-        e.preventDefault()
-        setQuestionIndex((i) => Math.max(0, i - 1))
-        return
-      }
-      if (e.key === "ArrowRight") {
-        e.preventDefault()
-        setQuestionIndex((i) => Math.min(request.questions.length - 1, i + 1))
-        return
-      }
-      if (e.key === "ArrowUp") {
-        e.preventDefault()
-        setSelectedIndex((i) => (i - 1 + options.length) % options.length)
-        return
-      }
-      if (e.key === "ArrowDown") {
-        e.preventDefault()
-        setSelectedIndex((i) => (i + 1) % options.length)
-        return
-      }
-      if (/^[1-9]$/.test(e.key)) {
-        const idx = Number(e.key) - 1
-        if (idx >= 0 && idx < options.length) {
-          e.preventDefault()
-          setSelectedIndex(idx)
-        }
-        return
-      }
-      if (isMulti && (e.key === " " || e.key === "Enter") && !e.shiftKey) {
-        e.preventDefault()
-        const selected = options[selectedIndex]
-        if (!selected) return
-        if (selected.isCustom) {
-          setAnswers((prev) => ({
-            ...prev,
-            [question.id]: {
-              optionId: NEXUS_CUSTOM_OPTION_ID,
-              optionLabel: customLabel,
-              customText: prev[question.id]?.customText ?? "",
-              optionIds: undefined,
-              optionLabels: undefined,
-            },
-          }))
-          return
-        }
-        setAnswers((prev) => {
-          const cur = prev[question.id] ?? {}
-          const ids = new Set(cur.optionIds ?? [])
-          if (ids.has(selected.id)) ids.delete(selected.id)
-          else ids.add(selected.id)
-          return {
-            ...prev,
-            [question.id]: {
-              optionIds: [...ids],
-              optionId: undefined,
-              optionLabel: undefined,
-              optionLabels: undefined,
-              customText: undefined,
-            },
-          }
-        })
-        return
-      }
-      if (!isMulti && e.key === "Enter") {
-        e.preventDefault()
-        const selected = options[selectedIndex]
-        if (!selected) return
-        const nextAnswers = {
-          ...answers,
-          [question.id]: {
-            optionId: selected.id,
-            optionLabel: selected.isCustom ? customLabel : selected.label,
-            customText: selected.isCustom ? (answers[question.id]?.customText ?? "") : undefined,
-          },
-        }
-        setAnswers(nextAnswers)
-        if (selected.isCustom) return
-        if (questionIndex < request.questions.length - 1) {
-          setQuestionIndex((i) => Math.min(request.questions.length - 1, i + 1))
-          return
-        }
-        if (everyAnswered(nextAnswers)) {
-          submitAnswers(nextAnswers)
-        }
-      }
-    }
-    window.addEventListener("keydown", onKey, true)
-    return () => window.removeEventListener("keydown", onKey, true)
-  }, [
-    answers,
-    customLabel,
-    customMode,
-    isMulti,
-    onDismiss,
-    options,
-    question,
-    questionIndex,
-    request.questions,
-    selectedIndex,
-    submitAnswers,
-  ])
-
-  return (
-    <div className="nexus-questionnaire-wrap nexus-questionnaire-wrap--input-slot">
-      <div className="nexus-questionnaire-card">
-        <div className="nexus-questionnaire-header">
-          <div className="nexus-questionnaire-header-text min-w-0">
-            {showKicker ? <div className="nexus-questionnaire-kicker">{request.title}</div> : null}
-            <div className="nexus-questionnaire-question-inline flex flex-wrap items-center gap-2 min-w-0">
-              {question?.header?.trim() ? (
-                <span className="nexus-questionnaire-header-chip">{question.header.trim()}</span>
-              ) : null}
-              <span className="min-w-0">{question?.question ?? ""}</span>
-            </div>
-          </div>
-          <div className="nexus-questionnaire-pager">
-            <button
-              type="button"
-              className="nexus-plan-mini-btn"
-              onClick={() => setQuestionIndex((i) => Math.max(0, i - 1))}
-              disabled={questionIndex === 0}
-              aria-label="Previous question"
-            >
-              ‹
-            </button>
-            <span className="nexus-questionnaire-pager-label">
-              {Math.min(questionIndex + 1, request.questions.length)} of {request.questions.length}
-            </span>
-            <button
-              type="button"
-              className="nexus-plan-mini-btn"
-              onClick={() => setQuestionIndex((i) => Math.min(request.questions.length - 1, i + 1))}
-              disabled={questionIndex >= request.questions.length - 1}
-              aria-label="Next question"
-            >
-              ›
-            </button>
-          </div>
-        </div>
-        <div className="nexus-questionnaire-body">
-          <div
-            className={`nexus-questionnaire-body-inner ${showPreview ? "nexus-questionnaire-body-inner--split" : ""}`}
-          >
-            <div className="nexus-questionnaire-options-col min-w-0">
-              <div className="nexus-questionnaire-options">
-                {options.map((option, index) => {
-                  const active = isMulti
-                    ? Boolean(activeAnswer?.optionIds?.includes(option.id))
-                    : activeAnswer?.optionId === option.id
-                  const isCustomRow = option.isCustom
-                  const focused = index === selectedIndex
-                  return (
-                    <button
-                      key={option.id}
-                      type="button"
-                      className={`nexus-questionnaire-option ${(active || focused) ? "nexus-questionnaire-option-active" : ""} ${isCustomRow ? "nexus-questionnaire-option--custom" : ""}`}
-                      onClick={() => {
-                        if (!question) return
-                        setSelectedIndex(index)
-                        if (isMulti) {
-                          if (isCustomRow) {
-                            setAnswers((prev) => ({
-                              ...prev,
-                              [question.id]: {
-                                optionId: NEXUS_CUSTOM_OPTION_ID,
-                                optionLabel: customLabel,
-                                customText: prev[question.id]?.customText ?? "",
-                                optionIds: undefined,
-                                optionLabels: undefined,
-                              },
-                            }))
-                            return
-                          }
-                          setAnswers((prev) => {
-                            const cur = prev[question.id] ?? {}
-                            const ids = new Set(cur.optionIds ?? [])
-                            if (ids.has(option.id)) ids.delete(option.id)
-                            else ids.add(option.id)
-                            return {
-                              ...prev,
-                              [question.id]: {
-                                optionIds: [...ids],
-                                optionId: undefined,
-                                optionLabel: undefined,
-                                optionLabels: undefined,
-                                customText: undefined,
-                              },
-                            }
-                          })
-                          return
-                        }
-                        setAnswers((prev) => ({
-                          ...prev,
-                          [question.id]: {
-                            optionId: option.id,
-                            optionLabel: isCustomRow ? customLabel : option.label,
-                            customText: isCustomRow ? (prev[question.id]?.customText ?? "") : undefined,
-                          },
-                        }))
-                      }}
-                    >
-                      <span className="nexus-questionnaire-option-num">
-                        {isMulti && !isCustomRow ? (active ? "☑" : "☐") : `${index + 1}.`}
-                      </span>
-                      <span className="nexus-questionnaire-option-label flex flex-col items-start gap-0.5 min-w-0">
-                        {isCustomRow ? (
-                          <span className="nexus-questionnaire-custom-placeholder" />
-                        ) : (
-                          <>
-                            <span>{option.label}</span>
-                            {option.description?.trim() ? (
-                              <span className="nexus-questionnaire-option-desc">{option.description.trim()}</span>
-                            ) : null}
-                          </>
-                        )}
-                      </span>
-                    </button>
-                  )
-                })}
-              </div>
-              {activeAnswer?.optionId === NEXUS_CUSTOM_OPTION_ID && question ? (
-                <textarea
-                  className="nexus-questionnaire-custom-input"
-                  value={activeAnswer.customText ?? ""}
-                  onChange={(e) =>
-                    setAnswers((prev) => ({
-                      ...prev,
-                      [question.id]: {
-                        optionId: NEXUS_CUSTOM_OPTION_ID,
-                        optionLabel: customLabel,
-                        customText: e.target.value,
-                        ...(isMulti
-                          ? { optionIds: undefined, optionLabels: undefined }
-                          : {}),
-                      },
-                    }))
-                  }
-                  placeholder="Your answer"
-                  rows={2}
-                />
-              ) : null}
-            </div>
-            {showPreview && focusedOption?.preview ? (
-              <div className="nexus-questionnaire-preview">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{focusedOption.preview}</ReactMarkdown>
-              </div>
-            ) : null}
-          </div>
-        </div>
-        <div className="nexus-questionnaire-card-footer">
-          <button type="button" className="nexus-questionnaire-dismiss" onClick={onDismiss}>
-            Dismiss <kbd className="nexus-kbd">Esc</kbd>
-          </button>
-          <button
-            type="button"
-            className="nexus-questionnaire-continue"
-            onClick={() => onSubmit(buildPayload(answers))}
-            disabled={!allAnswered}
-          >
-            {request.submitLabel ?? "Continue"} <kbd className="nexus-kbd">⏎</kbd>
-          </button>
-        </div>
-      </div>
-    </div>
   )
 }
 
@@ -928,10 +461,21 @@ function ChatBottomBar() {
 
 function SessionsView() {
   const { sessions, sessionId, switchSession, createNewSession, deleteSession, sessionsLoading } = useChatStore()
+  const [query, setQuery] = useState("")
+  const [visibleCount, setVisibleCount] = useState(SESSION_HISTORY_PAGE_SIZE)
+  const visibleHistory = useMemo(
+    () =>
+      visibleSessionHistory(sessions, {
+        query,
+        visibleCount,
+        activeSessionId: sessionId,
+      }),
+    [sessions, query, visibleCount, sessionId],
+  )
 
   const handleDelete = async (e: React.MouseEvent, s: { id: string; title?: string }) => {
     e.stopPropagation()
-    const label = s.title?.trim() || s.id.slice(0, 12)
+    const label = sessionDisplayTitle(s)
     if (!(await confirmAsync(`Delete session "${label}"? This cannot be undone.`))) return
     deleteSession(s.id)
   }
@@ -947,6 +491,21 @@ function SessionsView() {
         <PlusIcon className="w-3.5 h-3.5" />
         New session
       </button>
+      <label className="nexus-session-search mt-2">
+        <span className="sr-only">Search sessions</span>
+        <span className="codicon codicon-search nexus-session-search-icon" aria-hidden />
+        <input
+          type="search"
+          className="nexus-input nexus-session-search-input"
+          value={query}
+          onChange={(event) => {
+            setQuery(event.target.value)
+            setVisibleCount(SESSION_HISTORY_PAGE_SIZE)
+          }}
+          placeholder="Search conversations…"
+          autoComplete="off"
+        />
+      </label>
       {sessionsLoading && (
         <div className="nexus-loading-dots flex items-center gap-2 py-4 text-[var(--vscode-descriptionForeground)] text-sm">
           <span className="nexus-dot" />
@@ -955,15 +514,17 @@ function SessionsView() {
           <span className="ml-1">Loading...</span>
         </div>
       )}
-      {!sessionsLoading && sessions.length === 0 && (
-        <div className="nexus-muted text-xs">No saved sessions yet.</div>
+      {!sessionsLoading && visibleHistory.totalMatches === 0 && (
+        <div className="nexus-muted text-xs mt-2">
+          {query.trim() ? "No matching conversations." : "No saved sessions yet."}
+        </div>
       )}
 
       <div className="flex flex-col gap-2 mt-2">
-        {sessions.map((s) => {
+        {visibleHistory.sessions.map((s) => {
           const isActive = s.id === sessionId
           const date = new Date(s.ts).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" })
-          const title = (s.title?.trim() || "Untitled session").slice(0, 80)
+          const title = sessionDisplayTitle(s).slice(0, 80)
           return (
             <div
               key={s.id}
@@ -979,9 +540,6 @@ function SessionsView() {
                   <span className="text-[10px] nexus-muted">{date}</span>
                   <span className="text-[10px] nexus-muted">{s.messageCount} messages</span>
                 </div>
-                <div className="font-mono text-[10px] nexus-muted truncate mt-0.5" title={s.id}>
-                  {s.id}
-                </div>
               </button>
               <button
                 type="button"
@@ -996,11 +554,23 @@ function SessionsView() {
           )
         })}
       </div>
+      {visibleHistory.hasMore && (
+        <button
+          type="button"
+          className="nexus-secondary-btn mt-2"
+          onClick={() => setVisibleCount((count) => count + SESSION_HISTORY_PAGE_SIZE)}
+        >
+          Show {Math.min(
+            SESSION_HISTORY_PAGE_SIZE,
+            visibleHistory.totalMatches - visibleCount,
+          )} more
+        </button>
+      )}
     </div>
   )
 }
 
-/** Horizontal session tab bar: scrollable tabs, each with close (X), + new session, dropdown of all sessions. */
+/** Horizontal session tab bar with a bounded recent-session menu and full-history handoff. */
 function SessionTabBar() {
   const store = useChatStore()
   const { sessions, sessionId, switchSession, createNewSession, deleteSession, setView, sessionsLoading } = store
@@ -1017,11 +587,12 @@ function SessionTabBar() {
   }, [dropdownOpen])
 
   const displaySessions = visibleSessionTabs(sessions, sessionId)
+  const dropdownSessions = visibleSessionDropdown(sessions, sessionId)
 
   const handleDelete = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation()
     const s = sessions.find((x) => x.id === id)
-    const label = s?.title?.trim() || id.slice(0, 12)
+    const label = sessionDisplayTitle(s ?? { id })
     if (!(await confirmAsync(`Delete session "${label}"? This cannot be undone.`))) return
     deleteSession(id)
   }
@@ -1031,7 +602,7 @@ function SessionTabBar() {
       <div className="nexus-session-tab-bar-scroll" role="tablist">
         {displaySessions.map((s) => {
           const isActive = s.id === sessionId
-          const title = (s.title?.trim() || "Untitled session").slice(0, 40)
+          const title = sessionDisplayTitle(s).slice(0, 40)
           return (
             <div
               key={s.id}
@@ -1088,9 +659,9 @@ function SessionTabBar() {
                 ) : sessions.length === 0 ? (
                   <div className="nexus-muted text-xs px-2 py-1.5">No sessions</div>
                 ) : (
-                  sessions.map((s) => {
+                  dropdownSessions.map((s) => {
                     const isActive = s.id === sessionId
-                    const title = (s.title?.trim() || "Untitled session").slice(0, 60)
+                    const title = sessionDisplayTitle(s).slice(0, 60)
                     return (
                       <button
                         key={s.id}
@@ -1154,6 +725,42 @@ function PlanActionsBar({
     ? (collapsedNeedsClamp ? `${lines.slice(0, collapsedLineLimit).join("\n")}\n\n…` : fullText)
     : (!expandedNeedsClamp || showMore ? fullText : `${lines.slice(0, expandedLineLimit).join("\n")}\n\n…`)
   const mdSource = renderedText || "Plan saved to .nexus/plans/."
+  const canSubmit =
+    selected !== "revise" || instruction.trim().length > 0
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null
+      const action = planKeyboardAction({
+        key: event.key,
+        targetTag: target?.tagName,
+        targetEditable: target?.isContentEditable,
+        canSubmit,
+        ctrlKey: event.ctrlKey,
+        metaKey: event.metaKey,
+      })
+      if (action === "none") return
+      event.preventDefault()
+      if (typeof action === "object") {
+        setSelected(
+          action.select === 0
+            ? "implement"
+            : action.select === 1
+              ? "revise"
+              : "abandon",
+        )
+        return
+      }
+      onChoice(
+        selected,
+        planFollowupText ?? undefined,
+        selected === "revise" ? instruction : undefined,
+        false,
+      )
+    }
+    window.addEventListener("keydown", onKeyDown)
+    return () => window.removeEventListener("keydown", onKeyDown)
+  }, [canSubmit, instruction, onChoice, planFollowupText, selected])
 
   return (
     <div className="nexus-plan-followup-wrap nexus-plan-followup-wrap--input-slot">
@@ -1204,6 +811,7 @@ function PlanActionsBar({
           type="button"
           className={`nexus-plan-option ${selected === "implement" ? "nexus-plan-option-active" : ""}`}
           onClick={() => setSelected("implement")}
+          aria-pressed={selected === "implement"}
         >
           1. Yes, implement this plan
         </button>
@@ -1211,6 +819,7 @@ function PlanActionsBar({
           type="button"
           className={`nexus-plan-option ${selected === "revise" ? "nexus-plan-option-active" : ""}`}
           onClick={() => setSelected("revise")}
+          aria-pressed={selected === "revise"}
         >
           2. Revise the plan with feedback
         </button>
@@ -1218,6 +827,7 @@ function PlanActionsBar({
           type="button"
           className={`nexus-plan-option ${selected === "abandon" ? "nexus-plan-option-active" : ""}`}
           onClick={() => setSelected("abandon")}
+          aria-pressed={selected === "abandon"}
         >
           3. Exit Plan without implementing
         </button>
@@ -1232,7 +842,7 @@ function PlanActionsBar({
       ) : null}
       <div className="nexus-plan-followup-submit-row">
         <span className="nexus-plan-followup-hint">
-          Plan stays active until you choose.
+          1–3 select · Enter submits · Plan stays active until you choose.
         </span>
         <button
           type="button"
@@ -1245,7 +855,7 @@ function PlanActionsBar({
               false
             )
           }
-          disabled={selected === "revise" && instruction.trim().length === 0}
+          disabled={!canSubmit}
         >
           Submit <kbd className="nexus-kbd">⏎</kbd>
         </button>
@@ -1599,43 +1209,19 @@ function SettingsView({
             normalized content for this workspace.
           </p>
           <div className="flex flex-col gap-2">
-            {pendingProjectAuthority.map((request) => {
-              const detail = JSON.stringify(request.payload)
-              return (
-                <div
-                  key={`${request.kind}:${request.fingerprint}`}
-                  className="rounded border border-[var(--vscode-panel-border)] p-2"
-                >
-                  <div className="flex items-center gap-2">
-                    <div className="min-w-0 flex-1">
-                      <div className="text-xs font-medium">{request.kind}</div>
-                      <div
-                        className="text-[10px] font-mono break-all text-[var(--vscode-descriptionForeground)]"
-                        title={detail}
-                      >
-                        {detail.length <= 240
-                          ? detail
-                          : `${detail.slice(0, 239)}…`}
-                      </div>
-                      <div className="text-[9px] font-mono text-[var(--vscode-descriptionForeground)]">
-                        sha256:{request.fingerprint.slice(0, 16)}…
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      className="nexus-btn nexus-btn-primary text-xs py-1 px-2 flex-shrink-0"
-                      onClick={() =>
-                        postMessage({
-                          type: "approvePendingProjectAuthority",
-                          fingerprint: request.fingerprint,
-                        })}
-                    >
-                      Approve exact request
-                    </button>
-                  </div>
-                </div>
-              )
-            })}
+            {pendingProjectAuthority.map((request) => (
+              <ProjectAuthorityRequestCard
+                key={`${request.kind}:${request.fingerprint}`}
+                kind={request.kind}
+                payload={request.payload}
+                fingerprint={request.fingerprint}
+                onApprove={(fingerprint) =>
+                  postMessage({
+                    type: "approvePendingProjectAuthority",
+                    fingerprint,
+                  })}
+              />
+            ))}
           </div>
         </section>
       )}
@@ -1701,7 +1287,7 @@ function SettingsView({
         </div>
       </section>
 
-      <div className="flex flex-wrap gap-1.5 mt-2 mb-2">
+      <div className="nexus-settings-primary-tabs mt-2 mb-2">
         <TabPill id="llm" tab={tab} setTab={setTab} label="LLM" />
         <TabPill id="embeddings" tab={tab} setTab={setTab} label="Embeddings" />
         <TabPill id="index" tab={tab} setTab={setTab} label="Index" />

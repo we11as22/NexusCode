@@ -47,6 +47,9 @@ describe("remote CLI bootstrap", () => {
           ts: Date.now(),
           messageCount: 1,
           revision: 1,
+          mode: "plan",
+          planReturnMode: "debug",
+          todo: '[{"id":"plan-1","content":"Inspect","status":"in_progress"}]',
         })
       }
       if (url.pathname === "/session/remote-latest/message") {
@@ -65,6 +68,9 @@ describe("remote CLI bootstrap", () => {
 
     expect(nexus.session.id).toBe("remote-latest")
     expect(nexus.session.messages).toEqual([message])
+    expect(nexus.session.getMode()).toBe("plan")
+    expect(nexus.session.getPlanReturnMode()).toBe("debug")
+    expect(nexus.session.getTodo()).toContain('"content":"Inspect"')
     expect(nexus.serverUrl).toBe("https://nexus.test")
     expect(fetchMock).toHaveBeenCalled()
     await nexus.close()

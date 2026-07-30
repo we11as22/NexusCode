@@ -36,8 +36,23 @@ const COMPACTION_MIN_TAIL_MESSAGES = 4
 /** Per-message cap so one huge paste does not dominate the summarizer request. */
 const MAX_COMPACTION_MESSAGE_CHARS = 14_000
 const MAX_COMPACTION_SUMMARY_CHARS = 32_000
+/** OpenClaude-style guard against unbounded tiny-message histories. */
+export const DEFAULT_MAX_ACTIVE_MESSAGES = 200
+/** Safety cap still applies when proactive automatic compaction is disabled. */
+export const HARD_MAX_ACTIVE_MESSAGES = 1_000
 
 const compactQueues = new WeakMap<ISession, Promise<CompactionResult>>()
+
+export type ActiveMessageCompactionPressure = "soft" | "hard" | null
+
+export function getActiveMessageCompactionPressure(
+  messages: readonly SessionMessage[],
+): ActiveMessageCompactionPressure {
+  const activeCount = getActiveMessagesAfterLatestSummary(messages).length
+  if (activeCount > HARD_MAX_ACTIVE_MESSAGES) return "hard"
+  if (activeCount > DEFAULT_MAX_ACTIVE_MESSAGES) return "soft"
+  return null
+}
 
 export type CompactionResult =
   | {
@@ -716,6 +731,7 @@ function buildLLMMessages(messages: SessionMessage[]) {
         if (p.type === "image") return "" // images not included in compaction summary
         if (p.type === "text") {
           const t = p as { text: string; user_message?: string }
+          if (m.role === "user") return t.text
           const um = t.user_message?.trim()
           return um ? um + "\n" + t.text : t.text
         }

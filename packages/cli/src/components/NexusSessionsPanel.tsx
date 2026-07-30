@@ -153,8 +153,7 @@ export function NexusSessionsPanel({ sessions, onSelect, onClose }: Props): Reac
           {visibleItems.map((session, i) => {
             const globalIndex = scrollStart + i
             const isSelected = globalIndex === clampedIndex
-            const shortId = session.id.slice(0, 8)
-            const title = session.title ? ` ${session.title}` : ''
+            const title = session.title?.trim() || 'Untitled session'
             const date = formatDate(session.ts)
             const msgCount = `${session.messageCount} msg${session.messageCount !== 1 ? 's' : ''}`
             return (
@@ -162,10 +161,7 @@ export function NexusSessionsPanel({ sessions, onSelect, onClose }: Props): Reac
                 <Text color={isSelected ? theme.primary : undefined}>
                   {isSelected ? figures.pointer : ' '}{' '}
                 </Text>
-                <Text color={isSelected ? theme.primary : undefined}>{shortId}</Text>
-                {title ? (
-                  <Text color={isSelected ? theme.primary : undefined}>{title}</Text>
-                ) : null}
+                <Text color={isSelected ? theme.primary : undefined}>{title}</Text>
                 <Text dimColor>  {date}  {msgCount}</Text>
               </Box>
             )
@@ -175,7 +171,7 @@ export function NexusSessionsPanel({ sessions, onSelect, onClose }: Props): Reac
 
       {pendingSession && (
         <Box flexDirection="column" marginTop={1} borderStyle="single" borderColor={theme.secondaryBorder} paddingX={1}>
-          <Text bold>Session: <Text dimColor>{pendingSession.id.slice(0, 8)}</Text>{pendingSession.title ? ` ${pendingSession.title}` : ''}</Text>
+          <Text bold>Session: {pendingSession.title?.trim() || 'Untitled session'}</Text>
           <Box flexDirection="column" marginTop={1}>
             {(['Switch', 'Back'] as const).map((label, i) => (
               <Box key={label} height={1}>

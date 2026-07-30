@@ -16,7 +16,8 @@ import { CliHost } from "./host.js"
 export type RestoreType = "task" | "workspace" | "taskAndWorkspace"
 
 /**
- * Resolve checkpoint id to an entry: numeric string = 1-based index, otherwise = hash prefix match.
+ * Resolve a displayed checkpoint number. Opaque checkpoint identifiers remain
+ * accepted for backwards compatibility, but are not part of the user-facing CLI.
  */
 export function findCheckpointEntry(
   entries: readonly CheckpointEntry[],
@@ -69,7 +70,7 @@ export async function applyCheckpointRestore(
   if (!entry) {
     return {
       ok: false,
-      error: `Checkpoint "${checkpointId}" not found. Use "nexus task checkpoints" to list (by index or hash).`,
+      error: `Checkpoint "${checkpointId}" not found. Use "nexus task checkpoints" and restore it by its displayed number.`,
     }
   }
 
@@ -198,7 +199,7 @@ export async function runTaskRestore(
   }
 
   console.log(
-    `Restored ${restoreType}: ${result.hash.slice(0, 7)} ` +
+    `Restored ${restoreType} to checkpoint #${checkpointId} ` +
     `(${new Date(result.ts).toISOString()}); reverted ` +
     `${result.revertedChangeSets} Nexus-owned change set(s).`
   )
