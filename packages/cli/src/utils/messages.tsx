@@ -650,7 +650,103 @@ export function normalizeMessages(messages: Message[]): NormalizedMessage[] {
  * segments in the chat.
  */
 export function timelineSourceMessages(messages: Message[]): NormalizedMessage[] {
-  return messages.filter(isNotEmptyMessage).map(m => m as NormalizedMessage)
+  const source = messages.filter(isNotEmptyMessage)
+  const progressByToolUseId = new Map<string, ProgressMessage>()
+  const assistantToolUseIds = new Set<string>()
+
+  for (const message of source) {
+    if (message.type === 'progress') {
+      progressByToolUseId.set(message.toolUseID, message)
+      continue
+    }
+    if (message.type !== 'assistant' || !Array.isArray(message.message.content)) {
+      continue
+    }
+    for (const block of message.message.content) {
+      if (block.type === 'tool_use') assistantToolUseIds.add(block.id)
+    }
+  }
+
+  const emittedProgressIds = new Set<string>()
+  const projected: NormalizedMessage[] = []
+
+  const pushAssistantFragment = (
+    message: AssistantMessage,
+    content: ContentBlock[],
+    startIndex: number,
+  ) => {
+    if (content.length === 0) return
+    projected.push({
+      ...message,
+      uuid: `${message.uuid}:timeline:${startIndex}`,
+      message: {
+        ...message.message,
+        content,
+      },
+    } as NormalizedMessage)
+  }
+
+  for (const message of source) {
+    if (message.type === 'progress') {
+      // Once the completed assistant message arrives, place this stable
+      // progress row at the original tool_use position instead of leaving a
+      // second raw tool row earlier in the timeline.
+      if (assistantToolUseIds.has(message.toolUseID)) continue
+      projected.push(message as NormalizedMessage)
+      continue
+    }
+
+    if (message.type !== 'assistant' || !Array.isArray(message.message.content)) {
+      projected.push(message as NormalizedMessage)
+      continue
+    }
+
+    const blocks = message.message.content
+    const hasToolUse = blocks.some(block => block.type === 'tool_use')
+    const hasNonToolUse = blocks.some(block => block.type !== 'tool_use')
+    const substitutesProgress = blocks.some(
+      block =>
+        block.type === 'tool_use' && progressByToolUseId.has(block.id),
+    )
+    if (!substitutesProgress && !(hasToolUse && hasNonToolUse)) {
+      projected.push(message as NormalizedMessage)
+      continue
+    }
+
+    let fragment: ContentBlock[] = []
+    let fragmentKind: 'tool' | 'content' | null = null
+    let fragmentStart = 0
+    const flush = () => {
+      pushAssistantFragment(message, fragment, fragmentStart)
+      fragment = []
+      fragmentKind = null
+    }
+
+    for (let index = 0; index < blocks.length; index++) {
+      const block = blocks[index]!
+      const nextKind = block.type === 'tool_use' ? 'tool' : 'content'
+      if (fragmentKind !== null && fragmentKind !== nextKind) flush()
+
+      if (block.type === 'tool_use') {
+        const progress = progressByToolUseId.get(block.id)
+        if (progress) {
+          flush()
+          if (!emittedProgressIds.has(block.id)) {
+            projected.push(progress as NormalizedMessage)
+            emittedProgressIds.add(block.id)
+          }
+          continue
+        }
+      }
+
+      if (fragment.length === 0) fragmentStart = index
+      fragmentKind = nextKind
+      fragment.push(block)
+    }
+    flush()
+  }
+
+  return projected
 }
 
 type ToolUseRequestMessage = AssistantMessage & {
@@ -712,6 +808,14 @@ function stabilizeToolResultsAfterOwningAssistant(
   const out: NormalizedMessage[] = []
   for (const m of body) {
     out.push(m)
+    if (m.type === 'progress') {
+      const res = pendingById.get(m.toolUseID)
+      if (res) {
+        out.push(res)
+        pendingById.delete(m.toolUseID)
+      }
+      continue
+    }
     if (m.type !== 'assistant') continue
     const blocks = m.message.content
     if (!Array.isArray(blocks)) continue

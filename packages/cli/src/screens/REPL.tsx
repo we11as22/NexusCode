@@ -121,6 +121,7 @@ import { NexusSessionDiffBlock } from '../components/NexusSessionDiffBlock.js'
 import {
   buildChatTimeline,
   exploreSegmentShouldBeTransient,
+  getExploreTimelineKey,
 } from '../utils/exploreTimeline.js'
 import {
   compactTimelineAfterBoundary,
@@ -140,6 +141,7 @@ import {
   computeCliRenderWindowStart,
   type CliRenderWindowAnchor,
 } from '../cli-render-window.js'
+import { removePermissionRequest } from '../permission-queue.js'
 
 type MessageRenderItem = {
   key: string
@@ -365,9 +367,10 @@ export function REPL({
     jsx: React.ReactNode | null
     shouldHidePromptInput: boolean
   } | null>(null)
-  const [toolUseConfirm, setToolUseConfirm] = useState<ToolUseConfirm | null>(
-    null,
-  )
+  const [toolUseConfirmQueue, setToolUseConfirmQueue] = useState<
+    ToolUseConfirm[]
+  >([])
+  const toolUseConfirm = toolUseConfirmQueue[0] ?? null
   const [messages, setMessages] = useState<MessageType[]>(initialMessages ?? [])
   const [inputValue, setInputValue] = useState('')
   const [inputMode, setInputMode] = useState<'bash' | 'prompt'>('prompt')
@@ -1111,7 +1114,7 @@ export function REPL({
 
   useCancelRequest(
     setToolJSX,
-    setToolUseConfirm,
+    setToolUseConfirmQueue,
     setBinaryFeedbackContext,
     onCancel,
     isMessageSelectorVisibleRef,
@@ -1137,7 +1140,7 @@ export function REPL({
     }
   }, [messages, showCostDialog, haveShownCostDialog])
 
-  const canUseTool = useCanUseTool(setToolUseConfirm)
+  const canUseTool = useCanUseTool(setToolUseConfirmQueue)
 
   const remoteResumePromiseRef = useRef<Promise<boolean> | null>(null)
   const resumeActiveRemoteTurn = useCallback(async (): Promise<boolean> => {
@@ -1810,8 +1813,10 @@ export function REPL({
           if (piece.subagentChild) {
             return null
           }
-          const exploreKey = piece.messages.map((m) => m.uuid).join('|')
-          const rowKey = `explore-${exploreKey}`
+          const rowKey = getExploreTimelineKey(
+            piece.toolUseIds,
+            piece.messages[0]?.uuid ?? 'empty',
+          )
           const type = exploreSegmentShouldBeTransient(
             piece,
             unresolvedToolUseIDs,
@@ -2086,8 +2091,13 @@ export function REPL({
           !isMessageSelectorVisible &&
           !binaryFeedbackContext && (
             <PermissionRequest
+              key={toolUseConfirm.requestId}
               toolUseConfirm={toolUseConfirm}
-              onDone={() => setToolUseConfirm(null)}
+              onDone={() =>
+                setToolUseConfirmQueue(queue =>
+                  removePermissionRequest(queue, toolUseConfirm.requestId),
+                )
+              }
               verbose={verbose}
             />
           )}

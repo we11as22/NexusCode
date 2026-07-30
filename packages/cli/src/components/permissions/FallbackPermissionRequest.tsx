@@ -1,6 +1,6 @@
 import { Box, Text } from 'ink'
 import React, { useMemo } from 'react'
-import { Select } from '@inkjs/ui'
+import { Select } from '../CustomSelect/select.js'
 import { getTheme } from '../../utils/theme.js'
 import {
   PermissionRequestTitle,

@@ -428,7 +428,13 @@ async function* checkPermissionsAndCallTool(
   // and ask the user for permission if we don't
   const permissionResult = shouldSkipPermissionCheck
     ? ({ result: true } as const)
-    : await canUseTool(tool, normalizedInput, context, assistantMessage)
+    : await canUseTool(
+        tool,
+        normalizedInput,
+        context,
+        assistantMessage,
+        toolUseID,
+      )
   if (permissionResult.result === false) {
     yield createUserMessage([
       {

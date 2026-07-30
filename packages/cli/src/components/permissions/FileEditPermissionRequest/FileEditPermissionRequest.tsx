@@ -1,4 +1,4 @@
-import { Select } from '@inkjs/ui'
+import { Select } from '../../CustomSelect/select.js'
 import chalk from 'chalk'
 import { Box, Text } from 'ink'
 import { basename, extname } from 'path'

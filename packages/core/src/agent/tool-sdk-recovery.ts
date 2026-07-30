@@ -12,6 +12,35 @@ export function isAiSdkInvalidToolArgumentsError(err: unknown): boolean {
   return false
 }
 
+export type InvalidToolArgumentsLike = Error & {
+  toolName?: string
+  toolArgs?: string
+}
+
+/**
+ * A provider may repeat the same malformed parallel tool call several times in
+ * one stream. Preserve distinct failures, but do not append identical runtime
+ * messages (or render identical errors) for every repeated delta.
+ */
+export function createInvalidToolArgumentsDeduper(): {
+  shouldRecord(error: InvalidToolArgumentsLike): boolean
+} {
+  const seen = new Set<string>()
+  return {
+    shouldRecord(error) {
+      const fingerprint = JSON.stringify([
+        error.name,
+        error.toolName ?? "",
+        error.toolArgs ?? "",
+        error.message,
+      ])
+      if (seen.has(fingerprint)) return false
+      seen.add(fingerprint)
+      return true
+    },
+  }
+}
+
 /**
  * User-visible recovery text appended to the session when the SDK rejects a tool call shape.
  */

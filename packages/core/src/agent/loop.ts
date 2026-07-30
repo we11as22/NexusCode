@@ -47,6 +47,7 @@ import {
 } from "./tool-execution.js"
 import {
   buildUserMessageForInvalidSdkToolArgs,
+  createInvalidToolArgumentsDeduper,
   isAiSdkInvalidToolArgumentsError,
 } from "./tool-sdk-recovery.js"
 import { buildSkillToolDescriptionMerged, useSkillTool } from "../tools/built-in/use-skill.js"
@@ -1414,6 +1415,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
     let streamedContextOverflowError: Error | undefined
     /** When the AI SDK rejects tool-call args before execution, we inject a user hint and must not treat the turn as a normal text-only stop. */
     let sdkInvalidToolArgsRecovery = false
+    const invalidToolArgsDeduper = createInvalidToolArgumentsDeduper()
     let budgetExceededThisIteration = false
     const markToolBudgetExceeded = () => {
       if (budgetExceededThisIteration) return
@@ -1973,11 +1975,13 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
               const isRetrying = message.startsWith("Retrying after error")
               if (!isRetrying && isAiSdkInvalidToolArgumentsError(err)) {
                 sdkInvalidToolArgsRecovery = true
-                session.addMessage({
-                  role: "user",
-                  content: buildUserMessageForInvalidSdkToolArgs(err),
-                })
-                host.emit({ type: "error", error: message, fatal: false })
+                if (invalidToolArgsDeduper.shouldRecord(err)) {
+                  session.addMessage({
+                    role: "user",
+                    content: buildUserMessageForInvalidSdkToolArgs(err),
+                  })
+                  host.emit({ type: "error", error: message, fatal: false })
+                }
                 break
               }
               if (!isRetrying && isContextOverflowError(message)) {

@@ -57,6 +57,7 @@ export function toolUseConfirmGetPrefix(
 }
 
 export type ToolUseConfirm = {
+  requestId: string
   assistantMessage: AssistantMessage
   tool: Tool
   description: string

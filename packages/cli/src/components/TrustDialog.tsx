@@ -73,8 +73,8 @@ export function TrustDialog({ workspacePath, onDone }: Props): React.ReactNode {
             folder. Executing untrusted code is unsafe.
           </Text>
           <Text dimColor>
-            Review requested writes and commands. Local command execution is
-            permission-gated, but it is not an OS-level sandbox.
+            Review requested writes and commands. Approved local commands run
+            inside the native OS sandbox when the platform backend is ready.
           </Text>
         </Box>
 

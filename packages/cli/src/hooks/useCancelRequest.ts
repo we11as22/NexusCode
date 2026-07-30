@@ -13,7 +13,7 @@ export type NexusCancelRequestScope = {
 
 export function useCancelRequest(
   setToolJSX: SetToolJSXFn,
-  setToolUseConfirm: (toolUseConfirm: ToolUseConfirm | null) => void,
+  setToolUseConfirmQueue: (queue: ToolUseConfirm[]) => void,
   setBinaryFeedbackContext: (bfContext: BinaryFeedbackContext | null) => void,
   onCancel: () => void,
   isMessageSelectorVisibleRef: MutableRefObject<boolean>,
@@ -52,7 +52,7 @@ export function useCancelRequest(
       // Active run (main loop and/or sub-agents): Escape must abort even if a tool JSX shell is open.
       logEvent('tengu_cancel', {})
       setToolJSX(null)
-      setToolUseConfirm(null)
+      setToolUseConfirmQueue([])
       setBinaryFeedbackContext(null)
       onCancelRef.current()
     },

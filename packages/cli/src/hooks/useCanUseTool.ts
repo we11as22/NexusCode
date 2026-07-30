@@ -1,4 +1,4 @@
-import { useCallback } from 'react'
+import { useCallback, type Dispatch, type SetStateAction } from 'react'
 import { hasPermissionsToUseTool } from '../permissions.js'
 import { logEvent } from '../services/statsig.js'
 import { BashTool, inputSchema } from '../tools/BashTool/BashTool.js'
@@ -9,21 +9,21 @@ import { AssistantMessage } from '../query.js'
 import { ToolUseConfirm } from '../components/permissions/PermissionRequest.js'
 import { AbortError } from '../utils/errors.js'
 import { logError } from '../utils/log.js'
-
-type SetState<T> = React.Dispatch<React.SetStateAction<T>>
+import { enqueuePermissionRequest } from '../permission-queue.js'
 
 export type CanUseToolFn = (
   tool: ToolType,
   input: { [key: string]: unknown },
   toolUseContext: ToolUseContext,
   assistantMessage: AssistantMessage,
+  toolUseID?: string,
 ) => Promise<{ result: true } | { result: false; message: string }>
 
 function useCanUseTool(
-  setToolUseConfirm: SetState<ToolUseConfirm | null>,
+  setToolUseConfirmQueue: Dispatch<SetStateAction<ToolUseConfirm[]>>,
 ): CanUseToolFn {
   return useCallback<CanUseToolFn>(
-    async (tool, input, toolUseContext, assistantMessage) => {
+    async (tool, input, toolUseContext, assistantMessage, toolUseID) => {
       return new Promise(resolve => {
         function logCancelledEvent() {
           logEvent('tengu_tool_use_cancelled', {
@@ -33,6 +33,7 @@ function useCanUseTool(
         }
 
         function resolveWithCancelledAndAbortAllToolCalls() {
+          setToolUseConfirmQueue([])
           resolve({
             result: false,
             message: REJECT_MESSAGE,
@@ -83,7 +84,10 @@ function useCanUseTool(
             }
 
             // Does not have permissions to use tool, ask the user
-            setToolUseConfirm({
+            const request: ToolUseConfirm = {
+              requestId:
+                toolUseID ??
+                `${assistantMessage.message.id}:${tool.name}:${JSON.stringify(input)}`,
               assistantMessage,
               tool,
               description,
@@ -119,7 +123,10 @@ function useCanUseTool(
                 })
                 resolveWithCancelledAndAbortAllToolCalls()
               },
-            })
+            }
+            setToolUseConfirmQueue(queue =>
+              enqueuePermissionRequest(queue, request),
+            )
           })
           .catch(error => {
             if (error instanceof AbortError) {
@@ -131,7 +138,7 @@ function useCanUseTool(
           })
       })
     },
-    [setToolUseConfirm],
+    [setToolUseConfirmQueue],
   )
 }
 

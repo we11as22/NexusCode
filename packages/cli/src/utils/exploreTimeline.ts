@@ -51,6 +51,19 @@ export type ChatTimelinePiece =
       parentSpawnPartId?: string
     }
 
+/**
+ * A discovery wave keeps the identity of its first tool call. Results and
+ * later Read/Glob/List calls may extend the wave, but must not remount it:
+ * Stock Ink can otherwise leave the previous frame in terminal scrollback.
+ */
+export function getExploreTimelineKey(
+  toolUseIds: ReadonlySet<string>,
+  fallbackKey: string,
+): string {
+  const firstToolUseId = toolUseIds.values().next().value
+  return `explore-${firstToolUseId ?? fallbackKey}`
+}
+
 function registerExploreIdsFromToolUseBlock(block: ToolUseBlockParam): string[] {
   const input =
     typeof block.input === 'object' && block.input != null
