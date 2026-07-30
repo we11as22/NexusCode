@@ -123,7 +123,12 @@ func checkBackend() {
 		Cwd:           cwd,
 		ReadableRoots: readableRoots,
 		Network:       protocol.NetworkRestricted,
-		TimeoutMillis: 5_000,
+		// A cold CreateProcessWithLogonW start can spend several seconds
+		// initializing the sandbox account before the restricted child is
+		// ready. Keep this end-to-end probe budget larger than the native
+		// runner's bounded 15-second startup handshake. Codex likewise uses
+		// independent 15-second readiness and transport-connect guards.
+		TimeoutMillis: 30_000,
 		Environment:   map[string]string{},
 	}
 	command, err := platform.BuildCommand(request)
