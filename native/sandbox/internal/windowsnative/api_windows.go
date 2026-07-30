@@ -14,9 +14,8 @@ import (
 )
 
 const (
-	logonWithProfile = 0x00000001
-
 	createUnicodeEnvironment   = 0x00000400
+	createSuspended            = 0x00000004
 	extendedStartupInfoPresent = 0x00080000
 	createNoWindow             = 0x08000000
 
@@ -59,6 +58,8 @@ var (
 	procReleaseMutex            = kernel32.NewProc("ReleaseMutex")
 	procSetInformationJobObject = kernel32.NewProc("SetInformationJobObject")
 	procTerminateJobObject      = kernel32.NewProc("TerminateJobObject")
+	procAssignProcessToJob      = kernel32.NewProc("AssignProcessToJobObject")
+	procResumeThread            = kernel32.NewProc("ResumeThread")
 	procInitializeAttributeList = kernel32.NewProc("InitializeProcThreadAttributeList")
 	procUpdateAttribute         = kernel32.NewProc("UpdateProcThreadAttribute")
 	procDeleteAttributeList     = kernel32.NewProc("DeleteProcThreadAttributeList")
@@ -467,41 +468,54 @@ func createProcessWithLogon(
 	if err != nil {
 		return info, err
 	}
+	application, err := syscall.UTF16PtrFromString(argv[0])
+	if err != nil {
+		return info, err
+	}
 	currentDirectory, err := syscall.UTF16PtrFromString(cwd)
 	if err != nil {
 		return info, err
 	}
-	attributes, err := newAttributeList(1)
-	if err != nil {
-		return info, err
-	}
-	defer attributes.close()
-	jobs := []syscall.Handle{job}
-	if err := attributes.update(
-		procThreadAttributeJobList,
-		unsafe.Pointer(&jobs[0]),
-		unsafe.Sizeof(jobs[0]),
-	); err != nil {
-		return info, err
-	}
-	startup := startupInfoEx{}
+	startup := syscall.StartupInfo{}
 	startup.Cb = uint32(unsafe.Sizeof(startup))
-	startup.AttributeList = attributes.list
 	result, _, callErr := procCreateProcessWithLogonW.Call(
 		uintptr(unsafe.Pointer(user)),
 		uintptr(unsafe.Pointer(domain)),
 		uintptr(unsafe.Pointer(secret)),
-		logonWithProfile,
 		0,
+		uintptr(unsafe.Pointer(application)),
 		uintptr(unsafe.Pointer(&commandLine[0])),
-		createUnicodeEnvironment|extendedStartupInfoPresent|createNoWindow,
+		createUnicodeEnvironment|createSuspended|createNoWindow,
 		0,
 		uintptr(unsafe.Pointer(currentDirectory)),
-		uintptr(unsafe.Pointer(&startup.StartupInfo)),
+		uintptr(unsafe.Pointer(&startup)),
 		uintptr(unsafe.Pointer(&info)),
 	)
 	if result == 0 {
 		return info, fmt.Errorf("CreateProcessWithLogonW failed: %w", callErr)
+	}
+	assigned, _, assignErr := procAssignProcessToJob.Call(
+		uintptr(job),
+		uintptr(info.Process),
+	)
+	if assigned == 0 {
+		_ = syscall.TerminateProcess(info.Process, 125)
+		_ = syscall.CloseHandle(info.Thread)
+		_ = syscall.CloseHandle(info.Process)
+		return syscall.ProcessInformation{}, fmt.Errorf(
+			"AssignProcessToJobObject for Windows runner failed: %w",
+			assignErr,
+		)
+	}
+	resumed, _, resumeErr := procResumeThread.Call(uintptr(info.Thread))
+	if resumed == 0xFFFFFFFF {
+		_ = terminateJob(job, 125)
+		_ = syscall.CloseHandle(info.Thread)
+		_ = syscall.CloseHandle(info.Process)
+		return syscall.ProcessInformation{}, fmt.Errorf(
+			"ResumeThread for Windows runner failed: %w",
+			resumeErr,
+		)
 	}
 	return info, nil
 }
