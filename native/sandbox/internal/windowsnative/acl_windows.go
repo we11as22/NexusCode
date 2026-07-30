@@ -28,7 +28,7 @@ type authorityPlan struct {
 	GroupSID        string
 }
 
-const currentACLStateRevision = 2
+const currentACLStateRevision = 3
 
 type aclApplicationState struct {
 	Revision int               `json:"revision"`
@@ -461,9 +461,11 @@ func applyAuthorityACLs(
 
 // applyAncestorTraverseACLs lets the private sandbox identities resolve a
 // known readable root through profile directories that do not grant access to
-// unrelated local accounts. Only FILE_TRAVERSE/execute and read-attributes
-// semantics are granted: no directory listing, file read, or write authority.
-// Capability ACLs on the selected root remain authoritative for writes.
+// unrelated local accounts. PowerShell's filesystem provider requires
+// directory-read while normalizing 8.3 aliases, so read/execute applies to each
+// named ancestor itself but is deliberately non-inheritable: sibling trees and
+// files do not gain authority. Capability ACLs on the selected root remain
+// authoritative for writes.
 func applyAncestorTraverseACLs(
 	roots []string,
 	plan windowsmodel.CapabilityPlan,
@@ -519,7 +521,7 @@ func applyAncestorTraverseACLs(
 				}
 				continue
 			}
-			fingerprint := groupSID + "|traverse-v1"
+			fingerprint := groupSID + "|traverse-read-v2"
 			if state.Traverse[key] == fingerprint {
 				if atStopBoundary {
 					break
@@ -531,8 +533,9 @@ func applyAncestorTraverseACLs(
 				[]string{groupSID},
 				[]namedACLEntry{{
 					SID:         groupSID,
-					Permissions: fileGenericExecute,
+					Permissions: fileReadExecuteMask,
 					AccessMode:  grantAccess,
+					NoInherit:   true,
 				}},
 			); err != nil {
 				return false, fmt.Errorf(
@@ -590,6 +593,7 @@ type namedACLEntry struct {
 	SID         string
 	Permissions uint32
 	AccessMode  uint32
+	NoInherit   bool
 }
 
 // replaceNamedACLEntries performs a fail-closed two-phase DACL update. The
@@ -652,7 +656,7 @@ func applyNamedACLEntries(target string, mutations []namedACLEntry) error {
 		}
 		sids = append(sids, sid)
 		inheritance := uint32(0)
-		if mutation.AccessMode != revokeAccess {
+		if mutation.AccessMode != revokeAccess && !mutation.NoInherit {
 			inheritance = subContainersAndObjectsInherit
 		}
 		entries = append(entries, explicitAccessW{
