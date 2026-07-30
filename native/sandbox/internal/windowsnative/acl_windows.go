@@ -11,9 +11,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"syscall"
+	"unsafe"
 
 	"github.com/we11as22/NexusCode/native/sandbox/internal/protocol"
 	"github.com/we11as22/NexusCode/native/sandbox/internal/windowsmodel"
@@ -290,10 +292,6 @@ func applyAuthorityACLs(
 	onlineSID string,
 	groupSID string,
 ) error {
-	icacls, err := systemExecutable("icacls.exe")
-	if err != nil {
-		return err
-	}
 	ambient, err := canonicalExistingRoots(platformDefaultReadRoots(), false)
 	if err != nil {
 		return err
@@ -348,24 +346,21 @@ func applyAuthorityACLs(
 			[]string{groupSID},
 			plan.RestrictingSIDs...,
 		))
-		removeDenyArgs := []string{target, "/remove:d"}
-		for _, sid := range sids {
-			removeDenyArgs = append(removeDenyArgs, "*"+sid)
+		identityMask := uint32(fileReadExecuteMask)
+		if writable {
+			identityMask = fileModifyMask
 		}
-		if err := runICACLS(icacls, removeDenyArgs...); err != nil {
-			return fmt.Errorf("clear stale Nexus deny ACE on %q: %w", root, err)
-		}
-		grantArgs := []string{
-			target,
-			"/grant:r",
-			"*" + groupSID + ":" + identityRights,
-			"*" + caps.ReadSID + ":(OI)(CI)(RX)",
+		entries := []namedACLEntry{
+			{SID: groupSID, Permissions: identityMask, AccessMode: grantAccess},
+			{SID: caps.ReadSID, Permissions: fileReadExecuteMask, AccessMode: grantAccess},
 		}
 		if writable {
-			grantArgs = append(grantArgs, "*"+caps.WriteSID+":(OI)(CI)(M)")
+			entries = append(entries, namedACLEntry{
+				SID: caps.WriteSID, Permissions: fileModifyMask, AccessMode: grantAccess,
+			})
 		}
-		if err := runICACLS(icacls, grantArgs...); err != nil {
-			return err
+		if err := replaceNamedACLEntries(target, sids, entries); err != nil {
+			return fmt.Errorf("apply Nexus capability ACL on %q: %w", root, err)
 		}
 		if !isEphemeral {
 			state.Roots[key] = rootFingerprint
@@ -395,19 +390,13 @@ func applyAuthorityACLs(
 		if state.ReadOnly[protectedKey] == fingerprint {
 			continue
 		}
-		removeDenyArgs := []string{target, "/remove:d"}
-		denyArgs := []string{target, "/deny"}
+		entries := make([]namedACLEntry, 0, len(sids))
 		for _, sid := range sids {
-			removeDenyArgs = append(removeDenyArgs, "*"+sid)
-			denyArgs = append(
-				denyArgs,
-				"*"+sid+":(OI)(CI)(WD,AD,WEA,WA,DC,DE)",
-			)
+			entries = append(entries, namedACLEntry{
+				SID: sid, Permissions: fileWriteDenyMask, AccessMode: denyAccess,
+			})
 		}
-		if err := runICACLS(icacls, removeDenyArgs...); err != nil {
-			return err
-		}
-		if err := runICACLS(icacls, denyArgs...); err != nil {
+		if err := replaceNamedACLEntries(target, sids, entries); err != nil {
 			return fmt.Errorf("enforce read-only root %q: %w", root, err)
 		}
 		state.ReadOnly[protectedKey] = fingerprint
@@ -435,16 +424,13 @@ func applyAuthorityACLs(
 		if state.Denied[deniedKey] == fingerprint {
 			continue
 		}
-		removeDenyArgs := []string{target, "/remove:d"}
-		denyArgs := []string{target, "/deny"}
+		entries := make([]namedACLEntry, 0, len(sids))
 		for _, sid := range sids {
-			removeDenyArgs = append(removeDenyArgs, "*"+sid)
-			denyArgs = append(denyArgs, "*"+sid+":(OI)(CI)(F)")
+			entries = append(entries, namedACLEntry{
+				SID: sid, Permissions: fileFullControlMask, AccessMode: denyAccess,
+			})
 		}
-		if err := runICACLS(icacls, removeDenyArgs...); err != nil {
-			return err
-		}
-		if err := runICACLS(icacls, denyArgs...); err != nil {
+		if err := replaceNamedACLEntries(target, sids, entries); err != nil {
 			return fmt.Errorf("enforce denied root %q: %w", root, err)
 		}
 		state.Denied[deniedKey] = fingerprint
@@ -458,6 +444,150 @@ func applyAuthorityACLs(
 		if err := writeFileAtomic(aclStatePath(), data, 0o600); err != nil {
 			return fmt.Errorf("persist Windows ACL application state: %w", err)
 		}
+	}
+	return nil
+}
+
+const (
+	seFileObject            = 1
+	daclSecurityInformation = 0x00000004
+
+	denyAccess   = 3
+	revokeAccess = 4
+
+	subContainersAndObjectsInherit = 0x3
+
+	fileGenericRead     = 0x00120089
+	fileGenericWrite    = 0x00120116
+	fileGenericExecute  = 0x001200A0
+	fileDelete          = 0x00010000
+	fileDeleteChild     = 0x00000040
+	fileWriteData       = 0x00000002
+	fileAppendData      = 0x00000004
+	fileWriteEA         = 0x00000010
+	fileWriteAttributes = 0x00000100
+
+	fileReadExecuteMask = fileGenericRead | fileGenericExecute
+	fileModifyMask      = fileGenericRead | fileGenericWrite | fileGenericExecute | fileDelete
+	fileWriteDenyMask   = fileWriteData |
+		fileAppendData |
+		fileWriteEA |
+		fileWriteAttributes |
+		fileDeleteChild |
+		fileDelete
+	fileFullControlMask = 0x001F01FF
+)
+
+var (
+	procGetNamedSecurityInfoW = advapi32.NewProc("GetNamedSecurityInfoW")
+	procSetNamedSecurityInfoW = advapi32.NewProc("SetNamedSecurityInfoW")
+)
+
+type namedACLEntry struct {
+	SID         string
+	Permissions uint32
+	AccessMode  uint32
+}
+
+// replaceNamedACLEntries performs a fail-closed two-phase DACL update. The
+// first phase revokes explicit ACEs owned by NexusCode for the active trustees;
+// the second adds the exact desired grants or denies. A crash between phases
+// removes authority rather than retaining stale write access.
+func replaceNamedACLEntries(
+	target string,
+	revokeSIDs []string,
+	desired []namedACLEntry,
+) error {
+	revocations := make([]namedACLEntry, 0, len(revokeSIDs))
+	for _, sid := range uniqueStrings(revokeSIDs) {
+		revocations = append(revocations, namedACLEntry{
+			SID: sid, AccessMode: revokeAccess,
+		})
+	}
+	if err := applyNamedACLEntries(target, revocations); err != nil {
+		return fmt.Errorf("revoke stale ACEs: %w", err)
+	}
+	if err := applyNamedACLEntries(target, desired); err != nil {
+		return fmt.Errorf("install desired ACEs: %w", err)
+	}
+	return nil
+}
+
+func applyNamedACLEntries(target string, mutations []namedACLEntry) error {
+	if len(mutations) == 0 {
+		return nil
+	}
+	targetPointer, err := syscall.UTF16PtrFromString(target)
+	if err != nil {
+		return err
+	}
+	var oldACL *windowsACL
+	var descriptor unsafe.Pointer
+	status, _, _ := procGetNamedSecurityInfoW.Call(
+		uintptr(unsafe.Pointer(targetPointer)),
+		seFileObject,
+		daclSecurityInformation,
+		0,
+		0,
+		uintptr(unsafe.Pointer(&oldACL)),
+		0,
+		uintptr(unsafe.Pointer(&descriptor)),
+	)
+	if status != errorSuccess {
+		return fmt.Errorf("GetNamedSecurityInfoW failed with status %d", status)
+	}
+	if descriptor != nil {
+		defer syscall.LocalFree(syscall.Handle(uintptr(descriptor)))
+	}
+
+	sids := make([]*syscall.SID, 0, len(mutations))
+	entries := make([]explicitAccessW, 0, len(mutations))
+	for _, mutation := range mutations {
+		sid, err := syscall.StringToSid(mutation.SID)
+		if err != nil {
+			return fmt.Errorf("parse ACL SID %q: %w", mutation.SID, err)
+		}
+		sids = append(sids, sid)
+		inheritance := uint32(0)
+		if mutation.AccessMode != revokeAccess {
+			inheritance = subContainersAndObjectsInherit
+		}
+		entries = append(entries, explicitAccessW{
+			Permissions: mutation.Permissions,
+			AccessMode:  mutation.AccessMode,
+			Inheritance: inheritance,
+			Trustee: trusteeW{
+				TrusteeForm: trusteeIsSID,
+				TrusteeType: trusteeIsUnknown,
+				Name:        (*uint16)(unsafe.Pointer(sid)),
+			},
+		})
+	}
+	var newACL *windowsACL
+	status, _, _ = procSetEntriesInACLW.Call(
+		uintptr(len(entries)),
+		uintptr(unsafe.Pointer(&entries[0])),
+		uintptr(unsafe.Pointer(oldACL)),
+		uintptr(unsafe.Pointer(&newACL)),
+	)
+	runtime.KeepAlive(sids)
+	if status != errorSuccess {
+		return fmt.Errorf("SetEntriesInAclW failed with status %d", status)
+	}
+	if newACL != nil {
+		defer syscall.LocalFree(syscall.Handle(uintptr(unsafe.Pointer(newACL))))
+	}
+	status, _, _ = procSetNamedSecurityInfoW.Call(
+		uintptr(unsafe.Pointer(targetPointer)),
+		seFileObject,
+		daclSecurityInformation,
+		0,
+		0,
+		uintptr(unsafe.Pointer(newACL)),
+		0,
+	)
+	if status != errorSuccess {
+		return fmt.Errorf("SetNamedSecurityInfoW failed with status %d", status)
 	}
 	return nil
 }
