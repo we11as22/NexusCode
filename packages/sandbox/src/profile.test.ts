@@ -1,4 +1,3 @@
-import * as os from "node:os"
 import * as path from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { createSandboxRequest } from "./profile.js"
@@ -19,15 +18,15 @@ afterEach(() => {
 
 describe("createSandboxRequest", () => {
   it("creates a workspace-write profile with protected Nexus metadata", () => {
-    const cwd = path.resolve(os.tmpdir(), "nexus-profile-workspace")
-    const runtime = path.resolve(cwd, "installed-runtime")
+    const cwd = "/tmp/nexus-profile-workspace"
+    const runtime = path.posix.join(cwd, "installed-runtime")
     const request = createSandboxRequest({
       executionId: "exec-1",
       command: "printf ok",
       cwd,
       workspaceRoots: [cwd],
       protectedRoots: [runtime],
-      tempDir: path.join(cwd, ".tmp"),
+      tempDir: path.posix.join(cwd, ".tmp"),
       profile: "workspace-write",
       network: "restricted",
       timeoutMs: 12_345,
@@ -41,10 +40,10 @@ describe("createSandboxRequest", () => {
     expect(request.writableRoots).toContain(cwd)
     expect(request.readOnlyRoots).toEqual(
       expect.arrayContaining([
-        path.join(cwd, ".git"),
-        path.join(cwd, ".nexus"),
-        path.join(cwd, ".agents"),
-        path.join(cwd, ".codex"),
+        path.posix.join(cwd, ".git"),
+        path.posix.join(cwd, ".nexus"),
+        path.posix.join(cwd, ".agents"),
+        path.posix.join(cwd, ".codex"),
         runtime,
       ]),
     )
@@ -56,12 +55,12 @@ describe("createSandboxRequest", () => {
     expect(request.environment?.HTTPS_PROXY).toBe("http://127.0.0.1:9")
     expect(request.environment?.NPM_CONFIG_OFFLINE).toBe("true")
     expect(request.environment?.GIT_SSH_COMMAND).toBe("/usr/bin/false")
-    expect(request.environment?.TMPDIR).toBe(path.join(cwd, ".tmp"))
+    expect(request.environment?.TMPDIR).toBe(path.posix.join(cwd, ".tmp"))
   })
 
   it("creates a read-only profile with only its private temp writable", () => {
-    const cwd = path.resolve(os.tmpdir(), "nexus-profile-readonly")
-    const tempDir = path.join(cwd, ".tmp")
+    const cwd = "/tmp/nexus-profile-readonly"
+    const tempDir = path.posix.join(cwd, ".tmp")
     const request = createSandboxRequest({
       executionId: "exec-2",
       command: "git status",
@@ -77,13 +76,13 @@ describe("createSandboxRequest", () => {
   })
 
   it("does not expose a caller-controlled bypass or profile field through command text", () => {
-    const cwd = path.resolve(os.tmpdir(), "nexus-profile-authority")
+    const cwd = "/tmp/nexus-profile-authority"
     const request = createSandboxRequest({
       executionId: "exec-3",
       command: '{"disableSandbox":true}',
       cwd,
       workspaceRoots: [cwd],
-      tempDir: path.join(cwd, ".tmp"),
+      tempDir: path.posix.join(cwd, ".tmp"),
       profile: "workspace-write",
       platform: "darwin",
     })
@@ -133,13 +132,13 @@ describe("createSandboxRequest", () => {
   })
 
   it("keeps sandbox markers authoritative over caller environment overrides", () => {
-    const cwd = path.resolve(os.tmpdir(), "nexus-profile-env")
+    const cwd = "/tmp/nexus-profile-env"
     const request = createSandboxRequest({
       executionId: "exec-env",
       command: "env",
       cwd,
       workspaceRoots: [cwd],
-      tempDir: path.join(cwd, ".tmp"),
+      tempDir: path.posix.join(cwd, ".tmp"),
       profile: "workspace-write",
       platform: "darwin",
       environment: {
@@ -162,14 +161,14 @@ describe("createSandboxRequest", () => {
     process.env.LD_LIBRARY_PATH = "/tmp/untrusted-linux-libraries"
     process.env.DYLD_INSERT_LIBRARIES = "/tmp/untrusted-macos-loader.dylib"
     process.env.DYLD_LIBRARY_PATH = "/tmp/untrusted-macos-libraries"
-    const cwd = path.resolve(os.tmpdir(), "nexus-profile-loader-env")
+    const cwd = "/tmp/nexus-profile-loader-env"
 
     const request = createSandboxRequest({
       executionId: "exec-loader-env",
       command: "env",
       cwd,
       workspaceRoots: [cwd],
-      tempDir: path.join(cwd, ".tmp"),
+      tempDir: path.posix.join(cwd, ".tmp"),
       profile: "workspace-write",
       platform: "darwin",
       environment: {
@@ -214,13 +213,13 @@ describe("createSandboxRequest", () => {
   })
 
   it("preserves caller networking configuration when network is approved", () => {
-    const cwd = path.resolve(os.tmpdir(), "nexus-profile-network-enabled")
+    const cwd = "/tmp/nexus-profile-network-enabled"
     const request = createSandboxRequest({
       executionId: "exec-network-enabled",
       command: "git fetch",
       cwd,
       workspaceRoots: [cwd],
-      tempDir: path.join(cwd, ".tmp"),
+      tempDir: path.posix.join(cwd, ".tmp"),
       profile: "workspace-write",
       network: "enabled",
       platform: "darwin",
