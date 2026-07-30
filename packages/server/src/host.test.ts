@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises"
 import * as os from "node:os"
 import * as path from "node:path"
+import { fileURLToPath } from "node:url"
 import { afterEach, describe, expect, it } from "vitest"
 
 import { hashFileContent } from "@nexuscode/core"
@@ -26,6 +27,21 @@ async function workspace(): Promise<string> {
 }
 
 describe("ServerHost durable file mutations", () => {
+  it("rejects model writes under the packaged server runtime", async () => {
+    const packageRoot = path.resolve(
+      path.dirname(fileURLToPath(import.meta.url)),
+      "..",
+    )
+    const host = new ServerHost(packageRoot, () => {})
+
+    await expect(
+      host.resolvePath(path.join(packageRoot, "dist", "immutable-probe.js"), "write"),
+    ).rejects.toThrow(/immutable NexusCode runtime/i)
+    await expect(
+      host.resolvePath(path.join(packageRoot, "src", "editable-probe.ts"), "write"),
+    ).resolves.toBe(path.join(packageRoot, "src", "editable-probe.ts"))
+  })
+
   it("advertises question events supported by the session stream", async () => {
     const host = new ServerHost(await workspace(), () => {})
 

@@ -63,7 +63,6 @@ import {
   installGlobalPackage,
   assertMinVersion,
 } from '../utils/autoUpdater.js'
-import { PersistentShell } from '../utils/PersistentShell.js'
 import { GATE_USE_EXTERNAL_UPDATER } from '../constants/betas.js'
 import { clearTerminal } from '../utils/terminal.js'
 import { showInvalidConfigDialog } from '../components/InvalidConfigDialog.js'
@@ -1218,7 +1217,6 @@ async function stdin() {
 
 process.on('exit', () => {
   resetCursor()
-  PersistentShell.getInstance().close()
 })
 
 process.on('SIGINT', () => {

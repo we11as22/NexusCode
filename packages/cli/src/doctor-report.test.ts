@@ -30,6 +30,11 @@ describe("headless CLI doctor", () => {
       })),
       commandVersion,
       ripgrepStatus,
+      sandboxStatus: vi.fn(async () => ({
+        available: true,
+        target: "darwin-arm64",
+        version: "nexus-sandbox 0.1.0 protocol=1",
+      })),
     })
 
     expect(report.ok).toBe(true)
@@ -40,6 +45,9 @@ describe("headless CLI doctor", () => {
     )
     expect(commandVersion).toHaveBeenCalledTimes(1)
     expect(ripgrepStatus).toHaveBeenCalledTimes(1)
+    expect(report.lines.join("\n")).toContain(
+      "✓ OS sandbox darwin-arm64",
+    )
   })
 
   it("fails clearly on an unpinned runtime", async () => {
@@ -52,11 +60,42 @@ describe("headless CLI doctor", () => {
         model: { provider: "openai-compatible", id: "model:free" },
       })),
       commandVersion: vi.fn(async () => true),
+      sandboxStatus: vi.fn(async () => ({
+        available: true,
+        target: "darwin-arm64",
+      })),
     })
 
     expect(report.ok).toBe(false)
     expect(report.lines.join("\n")).toContain(
       "✗ Node 20.19.2; required 24.18.0",
+    )
+  })
+
+  it("fails closed when the native sandbox helper is missing", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "nexus-doctor-sandbox-"))
+    roots.push(root)
+
+    const report = await collectDoctorReport(root, {
+      runtimeVersion: "24.18.0",
+      loadConfig: vi.fn(async () => ({
+        model: { provider: "openai-compatible", id: "model:free" },
+      })),
+      commandVersion: vi.fn(async () => true),
+      ripgrepStatus: vi.fn(async () => ({
+        available: true,
+        source: "bundled" as const,
+      })),
+      sandboxStatus: vi.fn(async () => ({
+        available: false,
+        target: "linux-x64",
+        error: "helper missing",
+      })),
+    })
+
+    expect(report.ok).toBe(false)
+    expect(report.lines.join("\n")).toContain(
+      "✗ OS sandbox linux-x64 unavailable: helper missing",
     )
   })
 })

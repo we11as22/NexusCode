@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { NexusConfigSchema } from "../config/schema.js"
 import { createFakeHost } from "../test/fakes.js"
@@ -27,6 +27,42 @@ async function trustManifest(root: string, manifestPath: string): Promise<void> 
 }
 
 describe("plugin hook execution", () => {
+  it("fails closed when command hooks have no OS sandbox port", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "nexus-hook-no-sandbox-"))
+    roots.push(root)
+    const pluginRoot = path.join(root, ".nexus", "plugins", "demo")
+    await mkdir(pluginRoot, { recursive: true })
+    const manifestPath = path.join(pluginRoot, "plugin.json")
+    await writeFile(
+      manifestPath,
+      JSON.stringify({ name: "demo", hooks: ["after_tool:hook.sh"] }),
+      "utf8",
+    )
+    await writeFile(path.join(pluginRoot, "hook.sh"), "#!/bin/sh\n", "utf8")
+    await trustManifest(root, manifestPath)
+    const runCommand = vi.fn()
+    const host = createFakeHost({ cwd: root, runCommand })
+    Object.defineProperty(host, "runSandboxedCommand", {
+      value: undefined,
+      configurable: true,
+    })
+
+    const results = await runPluginHooks(
+      root,
+      host,
+      NexusConfigSchema.parse({}) as NexusConfig,
+      "after_tool",
+      { toolName: "Read" },
+    )
+
+    expect(results).toMatchObject([{
+      pluginName: "demo",
+      success: false,
+      output: expect.stringMatching(/sandbox.+unavailable/i),
+    }])
+    expect(runCommand).not.toHaveBeenCalled()
+  })
+
   it("runs legacy and OpenClaude hook families in deterministic sequence", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "nexus-hook-order-"))
     roots.push(root)
@@ -155,7 +191,7 @@ describe("plugin hook execution", () => {
       cwd: root,
       async runCommand(value, commandCwd) {
         command = value
-        expect(commandCwd).toBe(canonicalPluginRoot)
+        expect(commandCwd).toBe(root)
         return { stdout: "", stderr: "blocked by policy", exitCode: 2 }
       },
     })
@@ -167,6 +203,7 @@ describe("plugin hook execution", () => {
     })
 
     expect(command).toContain("verify-tool")
+    expect(command).toContain(`cd '${canonicalPluginRoot}'`)
     expect(results).toMatchObject([{
       pluginName: "demo",
       success: false,

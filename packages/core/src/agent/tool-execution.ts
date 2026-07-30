@@ -25,6 +25,7 @@ import { registerToolOutputSpill } from "../context/tool-output-registry.js"
 import { coerceQuestionOptionRows, splitQuestionOptionListString } from "../tools/user-question-utils.js"
 import { extractApplyPatchPaths } from "../tools/built-in/apply-patch.js"
 import { modeSpecificToolInputError } from "./mode-input-policy.js"
+import { issueSandboxEscalationGrant } from "./sandbox-escalation.js"
 
 export { modeSpecificToolInputError } from "./mode-input-policy.js"
 
@@ -1614,10 +1615,70 @@ export async function executeValidatedTool(
     const executionContext = fileEditApproval
       ? { ...ctx, fileEditApproval }
       : ctx
-    const result = await tool.execute(
+    let result = await tool.execute(
       validatedArgs as Record<string, unknown>,
       executionContext,
     )
+
+    if (
+      (resolvedToolName === "Bash" || resolvedToolName === "PowerShell") &&
+      result.metadata?.sandboxDenied === true &&
+      typeof result.metadata.sandboxExecutionId === "string"
+    ) {
+      const command =
+        typeof toolInput.command === "string" ? toolInput.command : ""
+      const sandboxApproval = await requestHostApproval(
+        host,
+        {
+          type: "sandbox_escalation",
+          tool: resolvedToolName,
+          description:
+            "The OS sandbox blocked this command. Run this exact command once outside the sandbox?",
+          shortDescription: "Run once outside the OS sandbox",
+          content: command,
+          warning:
+            "This one-time run can access resources outside the workspace and is never added to an allow list.",
+        },
+        ctx.partId ?? `part_${toolCallId}`,
+        { signal: ctx.signal },
+      )
+      if (!sandboxApproval.approved) {
+        if (sandboxApproval.whatToDoInstead?.trim()) {
+          const instruction = sandboxApproval.whatToDoInstead.trim()
+          session.addMessage({
+            role: "user",
+            content:
+              "[Regarding the declined sandbox escalation]\n\n" +
+              `Do this instead: ${instruction}`,
+          })
+          return {
+            success: false,
+            output:
+              "The command remained sandboxed and was not retried. " +
+              `Follow the user's instruction instead: ${instruction}`,
+            metadata: result.metadata,
+          }
+        }
+        return {
+          ...result,
+          output:
+            `${result.output}\n\n` +
+            "The command was not retried outside the OS sandbox.",
+        }
+      }
+      const sandboxEscalationGrant = issueSandboxEscalationGrant({
+        executionId: result.metadata.sandboxExecutionId,
+        command,
+        cwd: ctx.cwd,
+      })
+      result = await tool.execute(
+        validatedArgs as Record<string, unknown>,
+        {
+          ...executionContext,
+          sandboxEscalationGrant,
+        } as ToolContext,
+      )
+    }
 
     if (result.success && ctx.indexer && ["Write", "Edit"].includes(resolvedToolName)) {
       const targetPath = extractWriteTargetPath(resolvedToolName, validatedArgs as Record<string, unknown>)

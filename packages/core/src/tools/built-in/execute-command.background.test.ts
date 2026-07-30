@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
+import { spawn } from "node:child_process"
 import { afterEach, describe, expect, it } from "vitest"
 
 import { BackgroundProcessSupervisor } from "../../agent/background-process-supervisor.js"
@@ -79,6 +80,63 @@ function processIsAlive(pid: number): boolean {
   }
 }
 
+function backgroundTestHost(cwd: string) {
+  return createFakeHost({
+    cwd,
+    startSandboxedCommand(request, options) {
+      const child = spawn(request.command, [], {
+        cwd: request.cwd,
+        shell: true,
+        detached: process.platform !== "win32",
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      })
+      child.stdout.on("data", (chunk: Buffer) =>
+        options?.onStdout?.(chunk.toString("utf8")),
+      )
+      child.stderr.on("data", (chunk: Buffer) =>
+        options?.onStderr?.(chunk.toString("utf8")),
+      )
+      return {
+        pid: child.pid ?? 0,
+        ready: Promise.resolve("seatbelt" as const),
+        completion: new Promise((resolve) => {
+          child.once("error", (error) =>
+            resolve({
+              stdout: "",
+              stderr: error.message,
+              exitCode: 1,
+              sandbox: "seatbelt",
+              timedOut: false,
+              denied: false,
+            }),
+          )
+          child.once("close", (code) =>
+            resolve({
+              stdout: "",
+              stderr: "",
+              exitCode: code ?? 1,
+              sandbox: "seatbelt",
+              timedOut: false,
+              denied: false,
+            }),
+          )
+        }),
+        stop() {
+          if (child.exitCode != null || child.signalCode != null) return false
+          try {
+            if (process.platform === "win32") return child.kill("SIGTERM")
+            process.kill(-(child.pid ?? 0), "SIGTERM")
+            return true
+          } catch {
+            return false
+          }
+        },
+      }
+    },
+  })
+}
+
 afterEach(async () => {
   await Promise.allSettled(supervisors.splice(0).map((supervisor) => supervisor.close()))
   for (const pid of childPids) {
@@ -102,7 +160,7 @@ afterEach(async () => {
 describe.sequential("background shell lifecycle", () => {
   it("publishes a terminal task and preserves its log before owner close resolves", async () => {
     const { cwd, homeDir, runtime, supervisor, services } = await fixture()
-    const host = createFakeHost({ cwd })
+    const host = backgroundTestHost(cwd)
     const started = await startBackgroundShellTask({
       command: nodeCommand(
         "process.stdout.write('owner-close-log\\n'); setInterval(() => {}, 1000)",
@@ -137,7 +195,7 @@ describe.sequential("background shell lifecycle", () => {
 
   it("records command failures as terminal with readable output", async () => {
     const { cwd, runtime, services } = await fixture()
-    const host = createFakeHost({ cwd })
+    const host = backgroundTestHost(cwd)
     const started = await startBackgroundShellTask({
       command: nodeCommand(
         "process.stdout.write('failure-log\\n'); process.exit(7)",
@@ -164,7 +222,7 @@ describe.sequential("background shell lifecycle", () => {
 
   it("TaskStop waits for live process finalization and flushed output", async () => {
     const { cwd, runtime, supervisor, services } = await fixture()
-    const host = createFakeHost({ cwd })
+    const host = backgroundTestHost(cwd)
     const sessionId = "session-stop"
     const started = await startBackgroundShellTask({
       command: nodeCommand(

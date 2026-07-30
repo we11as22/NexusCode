@@ -123,6 +123,31 @@ export function createFakeHost(overrides: Partial<IHost> = {}): FakeHost {
         `Fake host command stub was not configured: ${command}`,
       )
     },
+    ...(overrides.runSandboxedCommand || overrides.runCommand
+      ? {
+          runSandboxedCommand: overrides.runSandboxedCommand
+            ? overrides.runSandboxedCommand.bind(overrides)
+            : async (request, signal) => {
+                const result = await overrides.runCommand!(
+                  request.command,
+                  request.cwd,
+                  signal,
+                )
+                return {
+                  ...result,
+                  sandbox: "seatbelt" as const,
+                  timedOut: false,
+                  denied: false,
+                }
+              },
+        }
+      : {}),
+    ...(overrides.startSandboxedCommand
+      ? {
+          startSandboxedCommand:
+            overrides.startSandboxedCommand.bind(overrides),
+        }
+      : {}),
     async showApprovalDialog(action, signal): Promise<PermissionResult> {
       approvals.push(action)
       if (overrides.showApprovalDialog) {

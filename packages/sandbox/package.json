@@ -1,0 +1,32 @@
+{
+  "name": "@nexuscode/sandbox",
+  "version": "0.1.0",
+  "private": true,
+  "description": "NexusCode native OS sandbox protocol and runtime",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "require": "./dist/index.cjs",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build:native": "node scripts/build-native.mjs",
+    "build": "corepack pnpm run build:native && tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "execa": "^9.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsup": "^8.3.0",
+    "typescript": "^5.5.0",
+    "vitest": "3.2.3"
+  }
+}

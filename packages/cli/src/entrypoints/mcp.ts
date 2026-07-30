@@ -8,7 +8,7 @@ import { z } from 'zod'
 import { zodToJsonSchema } from 'zod-to-json-schema'
 import { AgentTool } from '../tools/AgentTool/AgentTool.js'
 import { hasPermissionsToUseTool } from '../permissions.js'
-import { setCwd } from '../utils/state.js'
+import { setCwd, setOriginalCwd } from '../utils/state.js'
 import { getSlowAndCapableModel } from '../utils/model.js'
 import { logError } from '../utils/log.js'
 import { LSTool } from '../tools/lsTool/lsTool.js'
@@ -55,6 +55,7 @@ const MCP_TOOLS: Tool[] = [
 ]
 
 export async function startMCPServer(cwd: string): Promise<void> {
+  setOriginalCwd(cwd)
   await setCwd(cwd)
   const server = new Server(
     {

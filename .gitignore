@@ -23,6 +23,10 @@ packages/cli/dist/
 packages/vscode/dist/
 packages/vscode/webview-ui/dist/
 packages/server/dist/
+packages/sandbox/vendor/
+packages/cli/vendor/
+packages/server/vendor/
+packages/vscode/vendor/
 
 # IDE / Editor
 .idea/

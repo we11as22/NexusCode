@@ -50,25 +50,50 @@
 
 ---
 
-## One-command installs
+## Install everything with one command
 
-Both installers find the repository-pinned Node **24.18.0** even when the
-`nvm` shell function has not been loaded. From the repository root:
+The installer finds the repository-pinned Node **24.18.0** even when the
+current shell still uses Node 20 and the `nvm` shell function has not been
+loaded. From the repository root:
 
 ```bash
-corepack pnpm run cli
-corepack pnpm run extension
+./install.sh
 ```
 
-- `pnpm run cli` installs dependencies, builds core/CLI, bundles and verifies
-  the platform-specific ripgrep search runtime, and installs `nexus` into
-  `~/bin`.
-- `pnpm run extension` installs dependencies, builds every required package,
-  creates and validates `packages/vscode/nexuscode-0.1.0.vsix`, then installs
-  it through `code`, `code-insiders`, Cursor, Codium, or their standard macOS
-  application paths. If no compatible editor CLI can be found, it keeps the
-  verified VSIX and prints the exact manual installation instruction instead
-  of reporting a false installation success.
+On macOS, `install.command` can also be launched with a double click. A
+Windows launcher (`install.cmd`) is present, but the current Windows native
+sandbox backend intentionally fails closed and therefore the final installer
+verification will not report a usable agent shell there yet.
+
+That one action incrementally installs dependencies, builds the shared core,
+CLI and extension, bundles and verifies the current-platform OS sandbox and
+ripgrep runtimes, installs `nexus`, installs the VSIX into every detected
+VS Code/Cursor-compatible editor, verifies the reported extension version, and
+finishes with `nexus doctor`. It does not delete `node_modules` or the pnpm
+store.
+
+### Native sandbox support
+
+| Platform | Backend | Current verification |
+| --- | --- | --- |
+| macOS arm64/x64 | Seatbelt via the fixed `/usr/bin/sandbox-exec` path | arm64 is built, packaged, and exercised on a real host: workspace writes succeed; writes outside the workspace and to protected runtime metadata are denied; restricted network and Unix-socket rules are enforced |
+| Linux arm64/x64 | bundled Bubblewrap plus seccomp and process hardening | both architectures cross-build successfully and the policy/protocol layers are covered by tests; a real Linux host run is still required before claiming production parity |
+| Windows arm64/x64 | restricted token/job object | not implemented yet; the helper and installer fail closed instead of silently running model commands without isolation |
+
+CLI, server, background commands, plugin hooks, and the VS Code host all use
+the same Nexus-owned broker contract. An ordinary command approval authorizes
+only the sandboxed attempt. If that attempt is classified as a sandbox denial,
+the exact command may be retried outside the sandbox once only after a separate
+user decision; this escalation is never persisted as an “always allow” rule.
+
+The equivalent package command is:
+
+```bash
+corepack pnpm run ready
+```
+
+If no compatible editor CLI can be found, the installer keeps the verified
+VSIX and prints its exact path instead of reporting a false success.
 
 Set `NEXUS_VSCODE_INSTALL=0` when you only want to build/package the VSIX
 without installing it.
@@ -77,22 +102,15 @@ without installing it.
 
 ## One-command CLI setup (after clone)
 
-Clone the repo, then a **single command** installs everything; `nexus` can be run from anywhere afterward.
-
-**Important:** use the repository-pinned **Node 24.18.0** for install, build, and `nexus`. The CLI uses Ink on Node and does not require Bun or an external native SQLite addon; the managed backend uses the SQLite implementation built into Node. The CLI ships its own platform-specific ripgrep binary, so Homebrew/system `rg` is optional.
+Clone the repo, then the installer above installs everything; `nexus` can be
+run from anywhere afterward. The CLI uses Ink on Node and does not require Bun
+or an external native SQLite addon; the managed backend uses the SQLite
+implementation built into Node. The CLI ships its own platform-specific
+ripgrep binary, so Homebrew/system `rg` is optional.
 
 ```bash
 git clone <repo> NexusCode && cd NexusCode
-source "$HOME/.nvm/nvm.sh" 2>/dev/null || true
-nvm install         # first time only; installs the exact version from .nvmrc
-nvm use
-pnpm run cli        # one command: install → build → install nexus to ~/bin
-```
-
-Add to `~/.bashrc` (or `~/.profile`) once:
-
-```bash
-export PATH="$HOME/bin:$PATH"
+./install.sh
 ```
 
 Then in **any** terminal and from **any** directory:
@@ -101,13 +119,18 @@ Then in **any** terminal and from **any** directory:
 nexus
 ```
 
-To update after code changes (with the same pinned Node runtime):
+To update after code changes, run the same command again:
 
 ```bash
-cd NexusCode && nvm use && pnpm run cli
+cd NexusCode && ./install.sh
 ```
 
-The wrapper in `~/bin/nexus` remembers the Node binary used during installation. If that binary moves after an nvm change, run `pnpm run cli` again. `nexus doctor` reports whether search uses a system or bundled ripgrep runtime.
+The installed wrapper remembers the Node binary used during installation and
+points to an isolated runtime under `~/.local/share/nexuscode`, not back into
+the source checkout. If that Node binary moves after an nvm change, run
+`./install.sh` again. `nexus doctor` reports whether search uses a system or
+bundled ripgrep runtime and verifies that the native OS-sandbox backend is
+actually ready.
 
 ---
 
@@ -115,26 +138,15 @@ The wrapper in `~/bin/nexus` remembers the Node binary used during installation.
 
 **The only up-to-date NexusCode build is from this repo.** The project uses a **local store** (`.npmrc` → `store-dir=.pnpm-store`), so there is no conflict with the global pnpm store.
 
-From the repo root with the pinned **Node.js 24.18.0** (`nvm use`):
+From the repo root:
 
 ```bash
-pnpm run one
+./install.sh
 ```
 
-This single command incrementally installs dependencies and performs a bounded
-full build. It deliberately preserves `node_modules` and `.pnpm-store`; routine
-setup must not create a destructive dependency reinstall or a large avoidable
-resource spike. For a globally available CLI, prefer `pnpm run cli`.
-
-**Option “everything at once” (global CLI + .vsix extension):**
-
-```bash
-pnpm run ready
-```
-
-Performs the same incremental build, packages the extension and links the CLI.
-For the validated installers used in normal development, prefer the explicit
-commands `pnpm run cli` and `pnpm run extension`.
+This is the bounded full build and verified local installation. Separate
+`pnpm run cli` and `pnpm run extension` commands remain available for
+contributors who intentionally want only one surface.
 
 ---
 

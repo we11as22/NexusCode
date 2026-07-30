@@ -13,7 +13,12 @@ export function activate(context: vscode.ExtensionContext): void {
       NexusProvider.viewType,
       provider,
       { webviewOptions: { retainContextWhenHidden: true } }
-    )
+    ),
+    vscode.window.registerWebviewPanelSerializer("nexuscode.panel", {
+      async deserializeWebviewPanel(webviewPanel) {
+        await provider?.restorePanel(webviewPanel)
+      },
+    }),
   )
 
   // Register the provider itself for disposal

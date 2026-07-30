@@ -432,6 +432,7 @@ async function runOpenClaudeHookDeclarations(
       const root = await fs.realpath(declaration.plugin.rootDir)
       const rootArg = quoteShellArgument(root)
       const command = [
+        `cd ${rootArg}`,
         `export CLAUDE_PLUGIN_ROOT=${rootArg}`,
         `export CODEX_PLUGIN_ROOT=${rootArg}`,
         `export NEXUS_PLUGIN_ROOT=${rootArg}`,
@@ -443,7 +444,13 @@ async function runOpenClaudeHookDeclarations(
           : timeoutMs
       const abortController = new AbortController()
       const timeout = setTimeout(() => abortController.abort(), hookTimeoutMs)
-      const result = await host.runCommand(command, root, abortController.signal).catch((error: Error) => ({
+      const result = await runSandboxedPluginCommand(
+        host,
+        command,
+        host.cwd,
+        hookTimeoutMs,
+        abortController.signal,
+      ).catch((error: Error) => ({
         stdout: "",
         stderr: error.name === "AbortError"
           ? `Hook timed out after ${hookTimeoutMs}ms.`
@@ -539,7 +546,13 @@ async function runHookDeclarations(
         const command = getHookRunnerCommand(hookPath, payloadPath)
         const abortController = new AbortController()
         const timeout = setTimeout(() => abortController.abort(), timeoutMs)
-        const result = await host.runCommand(command, cwd, abortController.signal).catch((error: Error) => ({
+        const result = await runSandboxedPluginCommand(
+          host,
+          command,
+          cwd,
+          timeoutMs,
+          abortController.signal,
+        ).catch((error: Error) => ({
           stdout: "",
           stderr: error.name === "AbortError"
             ? `Hook timed out after ${timeoutMs}ms.`
@@ -571,6 +584,38 @@ async function runHookDeclarations(
       execution.preventContinuation === true ||
       Boolean(execution.additionalContext),
   )
+}
+
+async function runSandboxedPluginCommand(
+  host: IHost,
+  command: string,
+  cwd: string,
+  timeoutMs: number,
+  signal: AbortSignal,
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  if (!host.runSandboxedCommand) {
+    throw new Error(
+      "Nexus OS sandbox is unavailable; plugin command was not executed",
+    )
+  }
+  const result = await host.runSandboxedCommand(
+    {
+      executionId: `plugin-hook:${randomUUID()}`,
+      command,
+      cwd,
+      workspaceRoots: [host.cwd],
+      profile: "workspace-write",
+      network: "restricted",
+      timeoutMs,
+    },
+    signal,
+  )
+  if (result.setupError) {
+    throw new Error(
+      `Nexus OS sandbox could not start (${result.setupError.code}): ${result.setupError.message}`,
+    )
+  }
+  return result
 }
 
 export async function runPluginHooks(

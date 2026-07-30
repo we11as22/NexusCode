@@ -4,6 +4,7 @@ import { createHash, randomUUID } from "node:crypto"
 import { z } from "zod"
 import type {
   BackgroundTaskRecord,
+  HostSandboxCommandResult,
   MemoryRecord,
   ToolContext,
   ToolDef,
@@ -11,6 +12,7 @@ import type {
 } from "../../types.js"
 import { searchBm25 } from "../../search/bm25.js"
 import { startBackgroundShellTask } from "./execute-command.js"
+import { consumeSandboxEscalationGrant } from "../../agent/sandbox-escalation.js"
 import type { OrchestrationRuntime } from "../../orchestration/runtime.js"
 import { loadAgentDefinitions } from "../../orchestration/agents.js"
 import { loadPluginRuntimeRecords, runPluginHooks } from "../../plugins/runtime.js"
@@ -2025,12 +2027,83 @@ export const powerShellTool: ToolDef<z.infer<typeof powershellSchema>> = {
       `powershell -NoLogo -NonInteractive -Command ${quoteSingle(command)}`,
     ]
     let lastError = "PowerShell executable not found."
-    for (const shellCommand of candidates) {
-      const result = await ctx.host.runCommand(shellCommand, ctx.cwd, ctx.signal).catch((error: Error) => ({
+    if (!ctx.host.runSandboxedCommand) {
+      return {
+        success: false,
+        output:
+          "Nexus OS sandbox is unavailable in this host. The PowerShell command was not executed.",
+        metadata: {
+          sandboxSetupError: "sandbox_host_capability_unavailable",
+        },
+      }
+    }
+    for (const [candidateIndex, shellCommand] of candidates.entries()) {
+      const identity = ctx.executionIdentity
+      const executionId = identity
+        ? [
+            identity.runId,
+            identity.messageId,
+            identity.partId,
+            identity.toolCallId,
+            `powershell-${candidateIndex}`,
+          ].join(":")
+        : [
+            "legacy",
+            ctx.session?.id ?? "unknown-session",
+            ctx.toolExecutionMessageId ?? "unknown-message",
+            ctx.partId ?? "unknown-part",
+            `powershell-${candidateIndex}`,
+          ].join(":")
+      const escalationGrant = (
+        ctx as ToolContext & { sandboxEscalationGrant?: unknown }
+      ).sandboxEscalationGrant
+      const escalated = consumeSandboxEscalationGrant(escalationGrant, {
+        executionId,
+        command,
+        cwd: ctx.cwd,
+      })
+      const result: HostSandboxCommandResult = await (
+        escalated
+          ? ctx.host.runCommand(shellCommand, ctx.cwd, ctx.signal).then(
+              (value) => ({
+                ...value,
+                sandbox: "none" as const,
+                timedOut: false,
+                denied: false,
+              }),
+            )
+          : ctx.host.runSandboxedCommand(
+              {
+                executionId,
+                command: shellCommand,
+                cwd: ctx.cwd,
+                workspaceRoots: [ctx.host.cwd || ctx.cwd],
+                profile: "workspace-write",
+                network: "restricted",
+                timeoutMs: timeout ?? 120_000,
+              },
+              ctx.signal,
+            )
+      ).catch((error: Error) => ({
         stdout: "",
         stderr: error.message,
         exitCode: 1,
+        sandbox: "none" as const,
+        timedOut: false,
+        denied: false,
       }))
+      if (result.setupError) {
+        return {
+          success: false,
+          output:
+            `Nexus OS sandbox could not start (${result.setupError.code}). ` +
+            `The PowerShell command was not executed: ${result.setupError.message}`,
+          metadata: {
+            sandboxSetupError: result.setupError.code,
+            sandbox: result.sandbox,
+          },
+        }
+      }
       if (result.exitCode === 127 || /not found/i.test(result.stderr)) {
         lastError = result.stderr || lastError
         continue
@@ -2039,7 +2112,14 @@ export const powerShellTool: ToolDef<z.infer<typeof powershellSchema>> = {
       return {
         success: result.exitCode === 0,
         output: `$ ${shellCommand}\n[exit: ${result.exitCode}]\n${dangerousMessage ? `[warning] ${dangerousMessage}\n` : ""}${output}`.trim(),
-        metadata: { timeout: timeout ?? null },
+        metadata: {
+          timeout: timeout ?? null,
+          sandbox: result.sandbox,
+          sandboxDenied: result.denied,
+          sandboxTimedOut: result.timedOut,
+          sandboxExecutionId: executionId,
+          sandboxEscalated: escalated,
+        },
       }
     }
     return { success: false, output: lastError }

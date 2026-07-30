@@ -1,5 +1,14 @@
 import * as vscode from "vscode"
 import * as path from "path"
+import * as nodeFs from "node:fs/promises"
+import * as nodeFsSync from "node:fs"
+import * as os from "node:os"
+import {
+  createSandboxRequest,
+  resolveSandboxBinary,
+  runSandboxed,
+  startSandboxed,
+} from "@nexuscode/sandbox"
 import {
   approvalGrantKey,
   authorizeNetworkRequest as authorizePublicNetworkRequest,
@@ -34,6 +43,10 @@ import type {
   CapturedFileState,
   HostFileMutation,
   WorkspaceAuthorityStoreOptions,
+  HostSandboxCommandRequest,
+  HostSandboxCommandResult,
+  HostSandboxProcess,
+  HostSandboxStartOptions,
 } from "@nexuscode/core"
 import { sanitizeTerminalOutput } from "./terminal-output.js"
 import { parseStrictExternalHttpUrl } from "./external-url-policy.js"
@@ -41,6 +54,27 @@ import { resolveRipgrepPath } from "./services/indexing/list-absolute-paths-rg.j
 
 const NEXUS_PREVIEW_SCHEME = "nexuscode-preview"
 const MAX_CHANGE_FILE_BYTES = 128 * 1_024 * 1_024
+const VSCODE_PACKAGE_ROOT = path.resolve(__dirname, "..")
+const VSCODE_SANDBOX_ROOTS = [
+  VSCODE_PACKAGE_ROOT,
+  path.resolve(VSCODE_PACKAGE_ROOT, "..", "sandbox"),
+]
+const VSCODE_PROTECTED_RUNTIME_ROOTS = [
+  path.join(VSCODE_PACKAGE_ROOT, "dist"),
+  path.join(VSCODE_PACKAGE_ROOT, "vendor"),
+]
+
+function createPrivateSandboxTempDirectory(): string {
+  return nodeFsSync.mkdtempSync(path.join(os.tmpdir(), "nexus-sandbox-"))
+}
+
+async function removePrivateSandboxTempDirectory(
+  directory: string,
+): Promise<void> {
+  await nodeFs
+    .rm(directory, { recursive: true, force: true })
+    .catch(() => undefined)
+}
 const previewDocuments = new Map<string, string>()
 let previewProviderRegistration: vscode.Disposable | undefined
 
@@ -96,8 +130,19 @@ export function resolveWebviewApproval(
 ): boolean {
   const pending = slot.current
   if (!pending || pending.partId !== partId) return false
-  let exactResult = result
-  if (result.addToAllowedCommand !== undefined) {
+  let exactResult =
+    pending.action.type === "sandbox_escalation"
+      ? {
+          approved: result.approved,
+          ...(result.whatToDoInstead?.trim()
+            ? { whatToDoInstead: result.whatToDoInstead.trim() }
+            : {}),
+        }
+      : result
+  if (
+    pending.action.type !== "sandbox_escalation" &&
+    result.addToAllowedCommand !== undefined
+  ) {
     const expected =
       pending.action.type === "execute"
         ? pending.action.content
@@ -218,6 +263,18 @@ export class VsCodeHost implements IHost {
 
   private resolveWorkspacePath(filePath: string): string {
     return resolveAuthorizedWorkspacePath(this.cwd, filePath)
+  }
+
+  private assertMutableRuntimePath(absolutePath: string): void {
+    if (
+      VSCODE_PROTECTED_RUNTIME_ROOTS.some((root) =>
+        isSameOrDescendant(root, absolutePath),
+      )
+    ) {
+      throw new Error(
+        `Security: write denied for immutable NexusCode runtime ${absolutePath}`,
+      )
+    }
   }
 
   private isAuthorizedWorkspacePath(filePath: string): boolean {
@@ -386,9 +443,13 @@ export class VsCodeHost implements IHost {
 
   async resolvePath(
     filePath: string,
-    _access: HostPathAccess,
+    access: HostPathAccess,
   ): Promise<string> {
-    return this.resolveWorkspacePath(filePath)
+    const absolutePath = this.resolveWorkspacePath(filePath)
+    if (access !== "read" && access !== "list") {
+      this.assertMutableRuntimePath(absolutePath)
+    }
+    return absolutePath
   }
 
   async resolveRipgrepCommand() {
@@ -496,6 +557,7 @@ export class VsCodeHost implements IHost {
 
   async applyFileMutation(mutation: HostFileMutation): Promise<void> {
     const absolutePath = this.resolveWorkspacePath(mutation.path)
+    this.assertMutableRuntimePath(absolutePath)
     const current = await this.readFileState(mutation.path)
     if (!capturedMatchesExpected(current, mutation.expected)) {
       throw new FileMutationConflictError(mutation.path)
@@ -537,11 +599,13 @@ export class VsCodeHost implements IHost {
 
   async writeFile(filePath: string, content: string): Promise<void> {
     const absPath = this.resolveWorkspacePath(filePath)
+    this.assertMutableRuntimePath(absPath)
     await this.writeAuthorizedFile(absPath, content)
   }
 
   async deleteFile(filePath: string): Promise<void> {
     const absPath = this.resolveWorkspacePath(filePath)
+    this.assertMutableRuntimePath(absPath)
     const document = this.findOpenTextDocument(absPath)
     if (document?.isDirty) {
       throw new Error(
@@ -606,6 +670,83 @@ export class VsCodeHost implements IHost {
       stdout: result.stdout ?? "",
       stderr: result.stderr ?? "",
       exitCode: result.exitCode ?? 0,
+    }
+  }
+
+  async runSandboxedCommand(
+    request: HostSandboxCommandRequest,
+    signal?: AbortSignal,
+  ): Promise<HostSandboxCommandResult> {
+    const commandCwd = this.resolveWorkspacePath(request.cwd || this.cwd)
+    const workspaceRoot = this.resolveWorkspacePath(this.cwd)
+    const binaryPath = resolveSandboxBinary({
+      trustedRoots: VSCODE_SANDBOX_ROOTS,
+    })
+    const tempDir = createPrivateSandboxTempDirectory()
+    try {
+      return await runSandboxed(
+        createSandboxRequest({
+          executionId: request.executionId,
+          command: request.command,
+          cwd: commandCwd,
+          workspaceRoots: [workspaceRoot],
+          protectedRoots: VSCODE_PROTECTED_RUNTIME_ROOTS,
+          profile: request.profile,
+          network: request.network,
+          timeoutMs: request.timeoutMs,
+          tempDir,
+        }),
+        { binaryPath, signal },
+      )
+    } finally {
+      await removePrivateSandboxTempDirectory(tempDir)
+    }
+  }
+
+  startSandboxedCommand(
+    request: HostSandboxCommandRequest,
+    options: HostSandboxStartOptions = {},
+  ): HostSandboxProcess {
+    const commandCwd = this.resolveWorkspacePath(request.cwd || this.cwd)
+    const workspaceRoot = this.resolveWorkspacePath(this.cwd)
+    const binaryPath = resolveSandboxBinary({
+      trustedRoots: VSCODE_SANDBOX_ROOTS,
+    })
+    const tempDir = createPrivateSandboxTempDirectory()
+    let handle
+    try {
+      handle = startSandboxed(
+        createSandboxRequest({
+          executionId: request.executionId,
+          command: request.command,
+          cwd: commandCwd,
+          workspaceRoots: [workspaceRoot],
+          protectedRoots: VSCODE_PROTECTED_RUNTIME_ROOTS,
+          profile: request.profile,
+          network: request.network,
+          timeoutMs: request.timeoutMs,
+          tempDir,
+        }),
+        {
+          binaryPath,
+          detached: process.platform !== "win32",
+          maxOutputBytes: options.maxOutputBytes,
+          onStdout: options.onStdout,
+          onStderr: options.onStderr,
+        },
+      )
+    } catch (error) {
+      void removePrivateSandboxTempDirectory(tempDir)
+      throw error
+    }
+    const completion = handle.result.finally(() =>
+      removePrivateSandboxTempDirectory(tempDir),
+    )
+    return {
+      pid: handle.pid,
+      ready: handle.ready,
+      completion,
+      stop: handle.stop,
     }
   }
 
@@ -752,12 +893,18 @@ export class VsCodeHost implements IHost {
       return { approved: true }
     }
 
-    if (this.sessionAutoApprove) {
+    if (
+      action.type !== "sandbox_escalation" &&
+      this.sessionAutoApprove
+    ) {
       return { approved: true }
     }
 
     const alwaysKey = approvalGrantKey(action)
-    if (this.alwaysApproved.has(alwaysKey)) {
+    if (
+      action.type !== "sandbox_escalation" &&
+      this.alwaysApproved.has(alwaysKey)
+    ) {
       return { approved: true, alwaysApprove: true }
     }
 
@@ -806,12 +953,14 @@ export class VsCodeHost implements IHost {
             ? "access the public network"
           : "run"
     const buttons: string[] =
-      action.type === "execute"
+      action.type === "sandbox_escalation"
+        ? ["Allow once", "Say what to do instead", "Deny"]
+      : action.type === "execute"
         ? ["Allow once", "Add to allowed for this folder", "Always allow", "Allow all (session)", "Say what to do instead", "Deny"]
         : ["Allow once", "Always allow", "Allow all (session)", "Say what to do instead", "Deny"]
 
     const message =
-      action.type === "execute"
+      action.type === "execute" || action.type === "sandbox_escalation"
         ? (action.content ? `NexusCode wants to run: ${action.content}` : `NexusCode: ${action.description}`)
         : `NexusCode wants to ${actionStr}: ${action.description}${action.warning ? `\n\n${action.warning}` : ""}`
 
@@ -836,8 +985,11 @@ export class VsCodeHost implements IHost {
     }
 
     const approved = choice === "Allow once" || choice === "Always allow" || (action.type === "execute" && choice === "Add to allowed for this folder") || choice === "Allow all (session)"
-    const alwaysApprove = choice === "Always allow"
-    const skipAll = choice === "Allow all (session)"
+    const alwaysApprove =
+      action.type !== "sandbox_escalation" && choice === "Always allow"
+    const skipAll =
+      action.type !== "sandbox_escalation" &&
+      choice === "Allow all (session)"
     const addToAllowedCommand =
       action.type === "execute" && choice === "Add to allowed for this folder" && action.content
         ? action.content
@@ -1099,6 +1251,16 @@ export class VsCodeHost implements IHost {
     }
   }
 
+}
+
+function isSameOrDescendant(root: string, candidate: string): boolean {
+  const relative = path.relative(path.resolve(root), path.resolve(candidate))
+  return (
+    relative === "" ||
+    (relative !== ".." &&
+      !relative.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(relative))
+  )
 }
 
 function getLanguageFromExtension(ext: string): string {

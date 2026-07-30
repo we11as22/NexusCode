@@ -6,8 +6,13 @@
   "bin": {
     "nexus": "./dist/index.js"
   },
+  "files": [
+    "dist",
+    "vendor",
+    "package.json"
+  ],
   "scripts": {
-    "build": "tsup && node scripts/copy-ripgrep.mjs",
+    "build": "corepack pnpm --filter @nexuscode/sandbox build && node ../sandbox/scripts/copy-native.mjs . && tsup && node scripts/copy-ripgrep.mjs",
     "dev": "tsup --watch",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
@@ -21,6 +26,7 @@
     "@inkjs/ui": "^2.0.0",
     "@modelcontextprotocol/sdk": "1.27.1",
     "@nexuscode/core": "workspace:*",
+    "@nexuscode/sandbox": "workspace:*",
     "@vscode/ripgrep": "1.18.0",
     "ansi-escapes": "^6.0.0",
     "chalk": "^5.3.0",

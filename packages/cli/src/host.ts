@@ -1,8 +1,17 @@
 import * as fs from "node:fs/promises"
+import * as fsSync from "node:fs"
+import * as os from "node:os"
 import * as path from "node:path"
 import * as readline from "node:readline"
 import { randomUUID } from "node:crypto"
+import { fileURLToPath } from "node:url"
 import { execa } from "execa"
+import {
+  createSandboxRequest,
+  resolveSandboxBinary,
+  runSandboxed,
+  startSandboxed,
+} from "@nexuscode/sandbox"
 import {
   authorizeNetworkRequest as authorizePublicNetworkRequest,
   approvalGrantKey,
@@ -28,12 +37,38 @@ import type {
   CapturedFileState,
   HostFileMutation,
   HostCapabilities,
+  HostSandboxCommandRequest,
+  HostSandboxCommandResult,
+  HostSandboxProcess,
+  HostSandboxStartOptions,
 } from "@nexuscode/core"
 import { getRipgrepCommand } from "./utils/ripgrep.js"
 
 const DENY_EXTENSIONS = new Set([".env", ".key", ".pem", ".crt", ".p12", ".pfx"])
 const DENY_PATHS = [".env", "secrets", ".ssh", "id_rsa", "id_ed25519"]
 const MAX_CHANGE_FILE_BYTES = 128 * 1_024 * 1_024
+const CLI_PACKAGE_ROOT = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+)
+const CLI_SANDBOX_ROOTS = [
+  CLI_PACKAGE_ROOT,
+  path.resolve(CLI_PACKAGE_ROOT, "..", "sandbox"),
+]
+const CLI_PROTECTED_RUNTIME_ROOTS = [
+  path.join(CLI_PACKAGE_ROOT, "dist"),
+  path.join(CLI_PACKAGE_ROOT, "vendor"),
+]
+
+function createPrivateSandboxTempDirectory(): string {
+  return fsSync.mkdtempSync(path.join(os.tmpdir(), "nexus-sandbox-"))
+}
+
+async function removePrivateSandboxTempDirectory(
+  directory: string,
+): Promise<void> {
+  await fs.rm(directory, { recursive: true, force: true }).catch(() => undefined)
+}
 
 function absentFileState(): CapturedFileState {
   return { exists: false, content: null, mode: null }
@@ -85,7 +120,8 @@ export class CliHost implements IHost {
   readonly cwd: string
   readonly capabilities: HostCapabilities
   private eventEmitter: (event: AgentEvent) => void
-  private autoApprove: boolean
+  private readonly dangerousAutoApprove: boolean
+  private sessionAutoApprove = false
   /** When set, approval is resolved via this ref (TUI mode — no readline). */
   private tuiApprovalRef?: { current: ((r: PermissionResult) => void) | null }
   private alwaysApproved = new Set<string>()
@@ -107,7 +143,7 @@ export class CliHost implements IHost {
   ) {
     this.cwd = cwd
     this.eventEmitter = onEvent
-    this.autoApprove = autoApprove
+    this.dangerousAutoApprove = autoApprove
     this.tuiApprovalRef = tuiApprovalRef
     this.capabilities = {
       interactiveQuestions: tuiApprovalRef !== undefined,
@@ -276,12 +312,96 @@ export class CliHost implements IHost {
     }
   }
 
+  async runSandboxedCommand(
+    request: HostSandboxCommandRequest,
+    signal?: AbortSignal,
+  ): Promise<HostSandboxCommandResult> {
+    const commandCwd = await this.resolvePath(request.cwd || this.cwd, "read")
+    const workspaceRoot = this.resolve(this.cwd)
+    const binaryPath = resolveSandboxBinary({
+      trustedRoots: CLI_SANDBOX_ROOTS,
+    })
+    const tempDir = createPrivateSandboxTempDirectory()
+    try {
+      return await runSandboxed(
+        createSandboxRequest({
+          executionId: request.executionId,
+          command: request.command,
+          cwd: commandCwd,
+          workspaceRoots: [workspaceRoot],
+          protectedRoots: CLI_PROTECTED_RUNTIME_ROOTS,
+          profile: request.profile,
+          network: request.network,
+          timeoutMs: request.timeoutMs,
+          tempDir,
+        }),
+        { binaryPath, signal },
+      )
+    } finally {
+      await removePrivateSandboxTempDirectory(tempDir)
+    }
+  }
+
+  startSandboxedCommand(
+    request: HostSandboxCommandRequest,
+    options: HostSandboxStartOptions = {},
+  ): HostSandboxProcess {
+    const commandCwd = this.resolve(request.cwd || this.cwd)
+    const workspaceRoot = this.resolve(this.cwd)
+    this.checkPathSecurity(commandCwd, "read")
+    const binaryPath = resolveSandboxBinary({
+      trustedRoots: CLI_SANDBOX_ROOTS,
+    })
+    const tempDir = createPrivateSandboxTempDirectory()
+    let handle
+    try {
+      handle = startSandboxed(
+        createSandboxRequest({
+          executionId: request.executionId,
+          command: request.command,
+          cwd: commandCwd,
+          workspaceRoots: [workspaceRoot],
+          protectedRoots: CLI_PROTECTED_RUNTIME_ROOTS,
+          profile: request.profile,
+          network: request.network,
+          timeoutMs: request.timeoutMs,
+          tempDir,
+        }),
+        {
+          binaryPath,
+          detached: process.platform !== "win32",
+          maxOutputBytes: options.maxOutputBytes,
+          onStdout: options.onStdout,
+          onStderr: options.onStderr,
+        },
+      )
+    } catch (error) {
+      void removePrivateSandboxTempDirectory(tempDir)
+      throw error
+    }
+    const completion = handle.result.finally(() =>
+      removePrivateSandboxTempDirectory(tempDir),
+    )
+    return {
+      pid: handle.pid,
+      ready: handle.ready,
+      completion,
+      stop: handle.stop,
+    }
+  }
+
   async showApprovalDialog(
     action: ApprovalAction,
     signal?: AbortSignal,
   ): Promise<PermissionResult> {
     if (signal?.aborted) return { approved: false }
-    if (this.autoApprove) return { approved: true }
+    if (this.dangerousAutoApprove) return { approved: true }
+    if (
+      action.type !== "sandbox_escalation" &&
+      this.sessionAutoApprove
+    ) {
+      return { approved: true }
+    }
 
     if (!this.tuiApprovalRef && !process.stdin.isTTY) {
       const result = resolveNonInteractiveApproval(
@@ -302,7 +422,12 @@ export class CliHost implements IHost {
 
     // Check "always approve" memory for this session
     const alwaysKey = approvalGrantKey(action)
-    if (this.alwaysApproved.has(alwaysKey)) return { approved: true }
+    if (
+      action.type !== "sandbox_escalation" &&
+      this.alwaysApproved.has(alwaysKey)
+    ) {
+      return { approved: true }
+    }
 
     // TUI mode: don't use readline — return Promise resolved by TUI when user types y/n/a/s
     if (this.tuiApprovalRef) {
@@ -315,9 +440,28 @@ export class CliHost implements IHost {
           if (this.tuiApprovalRef?.current === resolver) {
             this.tuiApprovalRef.current = null
           }
-          if (result.alwaysApprove) this.alwaysApproved.add(alwaysKey)
-          if (result.skipAll) this.autoApprove = true
-          resolve(result)
+          if (
+            action.type !== "sandbox_escalation" &&
+            result.alwaysApprove
+          ) {
+            this.alwaysApproved.add(alwaysKey)
+          }
+          if (
+            action.type !== "sandbox_escalation" &&
+            result.skipAll
+          ) {
+            this.sessionAutoApprove = true
+          }
+          resolve(
+            action.type === "sandbox_escalation"
+              ? {
+                  approved: result.approved,
+                  ...(result.whatToDoInstead?.trim()
+                    ? { whatToDoInstead: result.whatToDoInstead.trim() }
+                    : {}),
+                }
+              : result,
+          )
         }
         const resolver = (result: PermissionResult) => finish(result)
         const onAbort = () => finish({ approved: false })
@@ -341,7 +485,11 @@ export class CliHost implements IHost {
       const onAbort = () => finish({ approved: false })
       const lines: string[] = [""]
 
-      if (action.type === "execute") {
+      if (action.type === "sandbox_escalation") {
+        lines.push(`\x1b[1;33m⚠ OS sandbox blocked this command\x1b[0m`)
+        lines.push(`  \x1b[36m${action.content || action.description}\x1b[0m`)
+        lines.push(`  \x1b[33mThis exception applies once and is never saved.\x1b[0m`)
+      } else if (action.type === "execute") {
         lines.push(`\x1b[1;33m⌨️  Bash\x1b[0m`)
         const cmd = action.content || action.description.replace(/^Run:\s*/i, "")
         lines.push(`  \x1b[36m${cmd}\x1b[0m`)
@@ -380,7 +528,9 @@ export class CliHost implements IHost {
       }
 
       const optionsLine =
-        action.type === "execute"
+        action.type === "sandbox_escalation"
+          ? `\x1b[90m[y] Allow this exact command once [n] Deny [i] Say what to do instead\x1b[0m`
+        : action.type === "execute"
           ? `\x1b[90m[y] Allow once [n] Deny [a] Always allow [s] Allow all (session) [e] Add to allowed (folder) [i] Say what to do instead\x1b[0m`
           : `\x1b[90m[y] Allow once [n] Deny [a] Always allow [s] Allow all (session) [i] Say what to do instead\x1b[0m`
       lines.push(optionsLine)
@@ -409,15 +559,24 @@ export class CliHost implements IHost {
           return
         }
         const addToAllowed = action.type === "execute" && (lower === "e" || lower === "add")
-        const approved = ["y", "yes", "a", "always", "s", "skip"].includes(lower) || addToAllowed
-        const alwaysApprove = lower === "a" || lower === "always"
-        const skipAll = lower === "s" || lower === "skip"
+        const sandboxEscalation = action.type === "sandbox_escalation"
+        const approved =
+          ["y", "yes"].includes(lower) ||
+          (!sandboxEscalation &&
+            ["a", "always", "s", "skip"].includes(lower)) ||
+          addToAllowed
+        const alwaysApprove =
+          !sandboxEscalation &&
+          (lower === "a" || lower === "always")
+        const skipAll =
+          !sandboxEscalation &&
+          (lower === "s" || lower === "skip")
 
         if (alwaysApprove) {
           this.alwaysApproved.add(alwaysKey)
         }
         if (skipAll) {
-          this.autoApprove = true
+          this.sessionAutoApprove = true
         }
 
         finish({
@@ -660,6 +819,16 @@ export class CliHost implements IHost {
 
   /** Guard against reading/writing sensitive paths */
   private checkPathSecurity(absPath: string, op: string): void {
+    if (
+      op !== "read" &&
+      CLI_PROTECTED_RUNTIME_ROOTS.some((root) =>
+        isSameOrDescendant(root, absPath),
+      )
+    ) {
+      throw new Error(
+        `Security: ${op} denied for immutable NexusCode runtime ${absPath}`,
+      )
+    }
     const ext = path.extname(absPath).toLowerCase()
     if (DENY_EXTENSIONS.has(ext)) {
       throw new Error(`Security: ${op} denied for ${absPath} (extension blocked)`)
@@ -674,4 +843,14 @@ export class CliHost implements IHost {
       }
     }
   }
+}
+
+function isSameOrDescendant(root: string, candidate: string): boolean {
+  const relative = path.relative(path.resolve(root), path.resolve(candidate))
+  return (
+    relative === "" ||
+    (relative !== ".." &&
+      !relative.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(relative))
+  )
 }

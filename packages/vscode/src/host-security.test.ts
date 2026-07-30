@@ -6,6 +6,14 @@ const hostSource = readFileSync(
   path.join(process.cwd(), "src", "host.ts"),
   "utf8",
 )
+const providerSource = readFileSync(
+  path.join(process.cwd(), "src", "provider.ts"),
+  "utf8",
+)
+const extensionSource = readFileSync(
+  path.join(process.cwd(), "src", "extension.ts"),
+  "utf8",
+)
 
 function methodBody(start: string, end: string): string {
   const startIndex = hostSource.indexOf(start)
@@ -21,6 +29,16 @@ describe("VS Code host workspace authority wiring", () => {
     expect(
       methodBody("private resolveWorkspacePath(", "async resolvePath("),
     ).toContain("resolveAuthorizedWorkspacePath(this.cwd, filePath)")
+  })
+
+  it("keeps the packaged extension runtime immutable to model file tools", () => {
+    expect(hostSource).toContain("VSCODE_PROTECTED_RUNTIME_ROOTS")
+    expect(
+      methodBody("private assertMutableRuntimePath(", "async resolvePath("),
+    ).toContain("isSameOrDescendant(root, absolutePath)")
+    expect(
+      methodBody("async applyFileMutation(", "async runCommand("),
+    ).toContain("this.assertMutableRuntimePath")
   })
 
   it.each([
@@ -82,5 +100,18 @@ describe("VS Code host workspace authority wiring", () => {
     ).toContain('{ kind: "mcp-tool"')
     expect(hostSource).not.toContain("allowed-commands.json")
     expect(hostSource).not.toContain("settings.local.json")
+  })
+})
+
+describe("VS Code webview lifecycle wiring", () => {
+  it("restores editor panels after an IDE window reload", () => {
+    expect(extensionSource).toContain(
+      'registerWebviewPanelSerializer("nexuscode.panel"',
+    )
+    expect(extensionSource).toContain("provider?.restorePanel(webviewPanel)")
+    expect(providerSource).toContain(
+      "async restorePanel(panel: vscode.WebviewPanel)",
+    )
+    expect(providerSource).toContain("this.attachPanel(panel)")
   })
 })

@@ -148,6 +148,18 @@ const OTHER_OPTIONS: Array<{
   { label: 'Say what to do instead', result: () => ({ approved: false, whatToDoInstead: '__instruct__' }) },
 ]
 
+const SANDBOX_ESCALATION_OPTIONS: Array<{
+  label: string
+  result: (action: ApprovalAction) => PermissionResult
+}> = [
+  { label: 'Allow this exact command once', result: () => ({ approved: true }) },
+  { label: 'No', result: () => ({ approved: false }) },
+  {
+    label: 'Say what to do instead',
+    result: () => ({ approved: false, whatToDoInstead: '__instruct__' }),
+  },
+]
+
 const MCP_OPTIONS: Array<{
   label: string
   result: (action: ApprovalAction) => PermissionResult
@@ -177,7 +189,14 @@ export function NexusApprovalPanel({
   const [customInstruction, setCustomInstruction] = useState('')
   const [mode, setMode] = useState<'choose' | 'instruct'>('choose')
 
-  const options = action.type === 'execute' ? getExecuteOptions(action) : action.type === 'mcp' ? getMcpOptions(action, cwd) : OTHER_OPTIONS
+  const options =
+    action.type === 'sandbox_escalation'
+      ? SANDBOX_ESCALATION_OPTIONS
+      : action.type === 'execute'
+        ? getExecuteOptions(action)
+        : action.type === 'mcp'
+          ? getMcpOptions(action, cwd)
+          : OTHER_OPTIONS
   const optionCount = options.length
   const [selectedIndex, setSelectedIndex] = useState(0)
 
@@ -314,6 +333,25 @@ export function NexusApprovalPanel({
                 <Text color={theme.warning}>  {action.warning}</Text>
               </Box>
             )}
+          </>
+        )}
+        {action.type === 'sandbox_escalation' && (
+          <>
+            <Box marginTop={1}>
+              <Text bold color={theme.warning}> OS sandbox blocked this command</Text>
+            </Box>
+            <Box marginTop={0}>
+              <Text color={theme.primary}>
+                {'  '}
+                {truncateMiddle(action.content || action.description, columns - 6)}
+              </Text>
+            </Box>
+            <Box marginTop={0}>
+              <Text color={theme.warning}>
+                {'  '}
+                This exception applies once and is never saved.
+              </Text>
+            </Box>
           </>
         )}
         {action.type === 'write' && (

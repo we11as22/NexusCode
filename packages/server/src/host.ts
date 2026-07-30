@@ -1,7 +1,16 @@
 import * as fs from "node:fs/promises"
+import * as fsSync from "node:fs"
+import * as os from "node:os"
 import * as path from "node:path"
 import { randomUUID } from "node:crypto"
+import { fileURLToPath } from "node:url"
 import { execa } from "execa"
+import {
+  createSandboxRequest,
+  resolveSandboxBinary,
+  runSandboxed,
+  startSandboxed,
+} from "@nexuscode/sandbox"
 import {
   authorizeNetworkRequest as authorizePublicNetworkRequest,
   FileMutationConflictError,
@@ -22,12 +31,38 @@ import type {
   PermissionResult,
   CapturedFileState,
   HostFileMutation,
+  HostSandboxCommandRequest,
+  HostSandboxCommandResult,
+  HostSandboxProcess,
+  HostSandboxStartOptions,
 } from "@nexuscode/core"
 import { resolveWorkspaceRoot } from "./security.js"
 
 const DENY_EXTENSIONS = new Set([".env", ".key", ".pem", ".crt", ".p12", ".pfx"])
 const DENY_PATHS = [".env", "secrets", ".ssh", "id_rsa", "id_ed25519"]
 const MAX_CHANGE_FILE_BYTES = 128 * 1_024 * 1_024
+const SERVER_PACKAGE_ROOT = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+)
+const SERVER_SANDBOX_ROOTS = [
+  SERVER_PACKAGE_ROOT,
+  path.resolve(SERVER_PACKAGE_ROOT, "..", "sandbox"),
+]
+const SERVER_PROTECTED_RUNTIME_ROOTS = [
+  path.join(SERVER_PACKAGE_ROOT, "dist"),
+  path.join(SERVER_PACKAGE_ROOT, "vendor"),
+]
+
+function createPrivateSandboxTempDirectory(): string {
+  return fsSync.mkdtempSync(path.join(os.tmpdir(), "nexus-sandbox-"))
+}
+
+async function removePrivateSandboxTempDirectory(
+  directory: string,
+): Promise<void> {
+  await fs.rm(directory, { recursive: true, force: true }).catch(() => undefined)
+}
 
 function absentFileState(): CapturedFileState {
   return { exists: false, content: null, mode: null }
@@ -102,6 +137,16 @@ export class ServerHost implements IHost {
   }
 
   private checkPathSecurity(absPath: string, op: string): void {
+    if (
+      op !== "read" &&
+      SERVER_PROTECTED_RUNTIME_ROOTS.some((root) =>
+        isSameOrDescendant(root, absPath),
+      )
+    ) {
+      throw new Error(
+        `Security: ${op} denied for immutable NexusCode runtime ${absPath}`,
+      )
+    }
     const ext = path.extname(absPath).toLowerCase()
     if (DENY_EXTENSIONS.has(ext)) {
       throw new Error(`Security: ${op} denied for ${absPath} (extension blocked)`)
@@ -252,6 +297,83 @@ export class ServerHost implements IHost {
     }
   }
 
+  async runSandboxedCommand(
+    request: HostSandboxCommandRequest,
+    signal?: AbortSignal,
+  ): Promise<HostSandboxCommandResult> {
+    const commandCwd = resolveWorkspaceRoot(request.cwd || this.cwd, [this.cwd])
+    const workspaceRoot = resolveWorkspaceRoot(this.cwd, [this.cwd])
+    const binaryPath = resolveSandboxBinary({
+      trustedRoots: SERVER_SANDBOX_ROOTS,
+    })
+    const tempDir = createPrivateSandboxTempDirectory()
+    try {
+      return await runSandboxed(
+        createSandboxRequest({
+          executionId: request.executionId,
+          command: request.command,
+          cwd: commandCwd,
+          workspaceRoots: [workspaceRoot],
+          protectedRoots: SERVER_PROTECTED_RUNTIME_ROOTS,
+          profile: request.profile,
+          network: request.network,
+          timeoutMs: request.timeoutMs,
+          tempDir,
+        }),
+        { binaryPath, signal },
+      )
+    } finally {
+      await removePrivateSandboxTempDirectory(tempDir)
+    }
+  }
+
+  startSandboxedCommand(
+    request: HostSandboxCommandRequest,
+    options: HostSandboxStartOptions = {},
+  ): HostSandboxProcess {
+    const commandCwd = resolveWorkspaceRoot(request.cwd || this.cwd, [this.cwd])
+    const workspaceRoot = resolveWorkspaceRoot(this.cwd, [this.cwd])
+    const binaryPath = resolveSandboxBinary({
+      trustedRoots: SERVER_SANDBOX_ROOTS,
+    })
+    const tempDir = createPrivateSandboxTempDirectory()
+    let handle
+    try {
+      handle = startSandboxed(
+        createSandboxRequest({
+          executionId: request.executionId,
+          command: request.command,
+          cwd: commandCwd,
+          workspaceRoots: [workspaceRoot],
+          protectedRoots: SERVER_PROTECTED_RUNTIME_ROOTS,
+          profile: request.profile,
+          network: request.network,
+          timeoutMs: request.timeoutMs,
+          tempDir,
+        }),
+        {
+          binaryPath,
+          detached: process.platform !== "win32",
+          maxOutputBytes: options.maxOutputBytes,
+          onStdout: options.onStdout,
+          onStderr: options.onStderr,
+        },
+      )
+    } catch (error) {
+      void removePrivateSandboxTempDirectory(tempDir)
+      throw error
+    }
+    const completion = handle.result.finally(() =>
+      removePrivateSandboxTempDirectory(tempDir),
+    )
+    return {
+      pid: handle.pid,
+      ready: handle.ready,
+      completion,
+      stop: handle.stop,
+    }
+  }
+
   async showApprovalDialog(
     action: ApprovalAction,
     signal?: AbortSignal,
@@ -288,4 +410,14 @@ export class ServerHost implements IHost {
         : `MCP server "${request.server}" requires manual authentication.`),
     }
   }
+}
+
+function isSameOrDescendant(root: string, candidate: string): boolean {
+  const relative = path.relative(path.resolve(root), path.resolve(candidate))
+  return (
+    relative === "" ||
+    (relative !== ".." &&
+      !relative.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(relative))
+  )
 }

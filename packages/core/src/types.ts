@@ -249,7 +249,15 @@ export interface ToolContext {
 // ─── Host Interface ───────────────────────────────────────────────────────────
 
 export interface ApprovalAction {
-  type: "write" | "execute" | "mcp" | "plugin" | "browser" | "read" | "doom_loop"
+  type:
+    | "write"
+    | "execute"
+    | "sandbox_escalation"
+    | "mcp"
+    | "plugin"
+    | "browser"
+    | "read"
+    | "doom_loop"
   tool: string
   description: string
   /** Workspace-relative target for single-file write approvals. */
@@ -439,6 +447,50 @@ export interface HostCapabilities {
   interactiveQuestions: boolean
 }
 
+export interface HostSandboxCommandRequest {
+  /** Stable identity allocated by the authoritative tool pipeline. */
+  executionId: string
+  /** Model-controlled shell source. It is never interpreted by the host itself. */
+  command: string
+  /** Canonical working directory selected by the current agent execution. */
+  cwd: string
+  /** Canonical roots owned by this execution. */
+  workspaceRoots: string[]
+  /** Filesystem capability granted to this invocation. */
+  profile: "read-only" | "workspace-write"
+  /** Outbound network is denied unless the trusted policy stage enables it. */
+  network: "restricted" | "enabled"
+  timeoutMs: number
+}
+
+export interface HostSandboxCommandResult {
+  stdout: string
+  stderr: string
+  exitCode: number
+  sandbox: "seatbelt" | "bwrap-seccomp" | "windows-restricted-token" | "none"
+  timedOut: boolean
+  denied: boolean
+  setupError?: {
+    code: string
+    message: string
+  }
+}
+
+export interface HostSandboxProcess {
+  /** PID of the trusted Nexus sandbox helper. */
+  pid: number
+  /** Resolves after the helper confirms OS policy activation, or null on setup failure. */
+  ready: Promise<HostSandboxCommandResult["sandbox"] | null>
+  completion: Promise<HostSandboxCommandResult>
+  stop(): boolean
+}
+
+export interface HostSandboxStartOptions {
+  onStdout?(chunk: string): void
+  onStderr?(chunk: string): void
+  maxOutputBytes?: number
+}
+
 export interface IHost {
   readonly cwd: string
   /** Explicit client capabilities; absent capabilities fail closed. */
@@ -476,6 +528,22 @@ export interface IHost {
     cwd: string,
     signal?: AbortSignal
   ): Promise<{ stdout: string; stderr: string; exitCode: number }>
+  /**
+   * Execute model-controlled shell input through the Nexus OS sandbox.
+   *
+   * This port is intentionally distinct from runCommand: the latter remains
+   * for trusted host-owned operations such as checkpoint/worktree plumbing.
+   * Agent shell tools must fail closed when this capability is unavailable.
+   */
+  runSandboxedCommand?(
+    request: HostSandboxCommandRequest,
+    signal?: AbortSignal,
+  ): Promise<HostSandboxCommandResult>
+  /** Start a long-running model command behind the same OS sandbox boundary. */
+  startSandboxedCommand?(
+    request: HostSandboxCommandRequest,
+    options?: HostSandboxStartOptions,
+  ): HostSandboxProcess
   showApprovalDialog(
     action: ApprovalAction,
     signal?: AbortSignal,

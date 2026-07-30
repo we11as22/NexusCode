@@ -2,6 +2,10 @@ import { getWorkspaceTrustIdentity } from "./utils/config.js"
 import { execFileNoThrow } from "./utils/execFileNoThrow.js"
 import { loadCliWorkspaceConfig } from "./nexus-bootstrap.js"
 import { getRipgrepStatus } from "./utils/ripgrep.js"
+import {
+  resolveSandboxBinary,
+  sandboxTarget,
+} from "@nexuscode/sandbox"
 
 const REQUIRED_NODE_VERSION = "24.18.0"
 
@@ -19,6 +23,12 @@ interface DoctorDependencies {
     source: "system" | "bundled" | "missing"
     version?: string
   }>
+  sandboxStatus(): Promise<{
+    available: boolean
+    target: string
+    version?: string
+    error?: string
+  }>
 }
 
 const defaultDependencies: DoctorDependencies = {
@@ -35,6 +45,37 @@ const defaultDependencies: DoctorDependencies = {
     return result.code === 0
   },
   ripgrepStatus: getRipgrepStatus,
+  sandboxStatus: async () => {
+    const target = sandboxTarget(process.platform, process.arch)
+    try {
+      const binary = resolveSandboxBinary()
+      const [version, backend] = await Promise.all([
+        execFileNoThrow(binary, ["--version"]),
+        execFileNoThrow(binary, ["--check"]),
+      ])
+      if (version.code !== 0 || backend.code !== 0) {
+        return {
+          available: false,
+          target,
+          error:
+            backend.stderr ||
+            version.stderr ||
+            `helper/backend exited ${version.code}/${backend.code}`,
+        }
+      }
+      return {
+        available: true,
+        target,
+        version: `${version.stdout.trim()}; ${backend.stdout.trim()}`,
+      }
+    } catch (error) {
+      return {
+        available: false,
+        target,
+        error: error instanceof Error ? error.message : String(error),
+      }
+    }
+  },
 }
 
 export async function collectDoctorReport(
@@ -76,9 +117,10 @@ export async function collectDoctorReport(
     )
   }
 
-  const [hasGit, ripgrep] = await Promise.all([
+  const [hasGit, ripgrep, sandbox] = await Promise.all([
     dependencies.commandVersion("git"),
     dependencies.ripgrepStatus(),
+    dependencies.sandboxStatus(),
   ])
   lines.push(
     hasGit
@@ -93,6 +135,16 @@ export async function collectDoctorReport(
     ok = false
     lines.push(
       "✗ ripgrep unavailable; rerun `pnpm run cli` to repair the packaged search runtime",
+    )
+  }
+  if (sandbox.available) {
+    lines.push(
+      `✓ OS sandbox ${sandbox.target} (${sandbox.version ?? "helper available"})`,
+    )
+  } else {
+    ok = false
+    lines.push(
+      `✗ OS sandbox ${sandbox.target} unavailable: ${sandbox.error ?? "reinstall or rebuild NexusCode"}`,
     )
   }
 

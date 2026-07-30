@@ -42,6 +42,9 @@ importers:
       '@nexuscode/core':
         specifier: workspace:*
         version: link:../core
+      '@nexuscode/sandbox':
+        specifier: workspace:*
+        version: link:../sandbox
       '@vscode/ripgrep':
         specifier: 1.18.0
         version: 1.18.0
@@ -169,6 +172,9 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: 1.27.1
         version: 1.27.1(zod@3.25.76)
+      '@nexuscode/sandbox':
+        specifier: workspace:*
+        version: link:../sandbox
       '@openrouter/ai-sdk-provider':
         specifier: ^0.7.5
         version: 0.7.5(ai@4.3.19(react@18.3.1)(zod@3.25.76))(zod@3.25.76)
@@ -255,6 +261,25 @@ importers:
         specifier: 3.2.3
         version: 3.2.3(@types/debug@4.1.12)(@types/node@24.13.3)
 
+  packages/sandbox:
+    dependencies:
+      execa:
+        specifier: ^9.5.0
+        version: 9.6.1
+    devDependencies:
+      '@types/node':
+        specifier: ^24.0.0
+        version: 24.13.3
+      tsup:
+        specifier: ^8.3.0
+        version: 8.5.1(jiti@1.21.7)(postcss@8.5.6)(typescript@5.9.3)(yaml@2.8.3)
+      typescript:
+        specifier: ^5.5.0
+        version: 5.9.3
+      vitest:
+        specifier: 3.2.3
+        version: 3.2.3(@types/debug@4.1.12)(@types/node@24.13.3)
+
   packages/server:
     dependencies:
       '@hono/node-server':
@@ -263,6 +288,9 @@ importers:
       '@nexuscode/core':
         specifier: workspace:*
         version: link:../core
+      '@nexuscode/sandbox':
+        specifier: workspace:*
+        version: link:../sandbox
       '@nexuscode/state':
         specifier: workspace:*
         version: link:../state
@@ -306,6 +334,9 @@ importers:
       '@nexuscode/core':
         specifier: workspace:*
         version: link:../core
+      '@nexuscode/sandbox':
+        specifier: workspace:*
+        version: link:../sandbox
       diff:
         specifier: ^7.0.0
         version: 7.0.0

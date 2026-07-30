@@ -1,9 +1,13 @@
 import React from 'react'
+import { mkdtemp, realpath } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 
 import type { ToolUseContext } from '../Tool.js'
 import help from '../commands/help.js'
 import { processUserInput } from './messages.js'
+import { getCwd, setCwd, setOriginalCwd } from './state.js'
 
 function context(
   resolvePromptCommand: NonNullable<
@@ -95,5 +99,25 @@ describe('Nexus custom slash commands', () => {
 
     await expect(pending).resolves.toEqual([])
     expect(refresh).not.toHaveBeenCalled()
+  })
+})
+
+describe('direct CLI shell cwd', () => {
+  it('does not allow cd to escape the trusted workspace', async () => {
+    const workspace = await mkdtemp(join(tmpdir(), 'nexus-cwd-workspace-'))
+    const outside = await mkdtemp(join(tmpdir(), 'nexus-cwd-outside-'))
+    setOriginalCwd(workspace)
+    await setCwd(workspace)
+
+    const messages = await processUserInput(
+      `cd ${outside}`,
+      'bash',
+      () => {},
+      context(async () => ({ status: 'not-found' })),
+      null,
+    )
+
+    expect(getCwd()).toBe(await realpath(workspace))
+    expect(JSON.stringify(messages)).toContain('outside the trusted workspace')
   })
 })

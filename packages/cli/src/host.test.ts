@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises"
 import * as os from "node:os"
 import * as path from "node:path"
+import { fileURLToPath } from "node:url"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
@@ -76,6 +77,75 @@ describe("non-interactive approvals", () => {
     expect(shouldAutoApprovePrint(undefined)).toBe(false)
     expect(shouldAutoApprovePrint(false)).toBe(false)
     expect(shouldAutoApprovePrint(true)).toBe(true)
+  })
+})
+
+describe("trusted CLI runtime boundary", () => {
+  it("rejects model file mutations under the packaged runtime", async () => {
+    const packageRoot = path.resolve(
+      path.dirname(fileURLToPath(import.meta.url)),
+      "..",
+    )
+    const host = new CliHost(packageRoot, () => {})
+
+    await expect(
+      host.resolvePath(path.join(packageRoot, "dist", "immutable-probe.js"), "write"),
+    ).rejects.toThrow(/immutable NexusCode runtime/i)
+    await expect(
+      host.resolvePath(path.join(packageRoot, "src", "editable-probe.ts"), "write"),
+    ).resolves.toBe(path.join(packageRoot, "src", "editable-probe.ts"))
+  })
+})
+
+describe.runIf(
+  process.platform === "darwin" &&
+    process.env.NEXUS_NATIVE_SANDBOX_SMOKE === "1",
+)("native OS sandbox integration", () => {
+  it("writes in the workspace and protects Nexus metadata", async () => {
+    const workspace = await fs.mkdtemp(
+      path.join(os.tmpdir(), "nexus-cli-sandbox-smoke-"),
+    )
+    try {
+      const host = new CliHost(workspace, () => {}, true)
+      const write = await host.runSandboxedCommand(
+        {
+          executionId: "cli-native-write",
+          command: "printf 'sandbox-ok' > inside.txt",
+          cwd: workspace,
+          workspaceRoots: [workspace],
+          profile: "workspace-write",
+          network: "restricted",
+          timeoutMs: 10_000,
+        },
+      )
+      expect(write).toMatchObject({
+        exitCode: 0,
+        sandbox: "seatbelt",
+        denied: false,
+      })
+      await expect(
+        fs.readFile(path.join(workspace, "inside.txt"), "utf8"),
+      ).resolves.toBe("sandbox-ok")
+
+      const protectedWrite = await host.runSandboxedCommand(
+        {
+          executionId: "cli-native-protected",
+          command: "mkdir -p .nexus && printf blocked > .nexus/config.json",
+          cwd: workspace,
+          workspaceRoots: [workspace],
+          profile: "workspace-write",
+          network: "restricted",
+          timeoutMs: 10_000,
+        },
+      )
+      expect(protectedWrite.exitCode).not.toBe(0)
+      expect(protectedWrite.denied).toBe(true)
+      await expect(
+        fs.readFile(path.join(workspace, ".nexus", "config.json"), "utf8"),
+      ).rejects.toMatchObject({ code: "ENOENT" })
+    } finally {
+      await fs.rm(workspace, { recursive: true, force: true })
+    }
   })
 })
 

@@ -9,7 +9,7 @@ import {
 import { getCommand, hasCommand } from '../commands.js'
 import { MalformedCommandError } from './errors.js'
 import { logError } from './log.js'
-import { resolve } from 'path'
+import { isAbsolute, relative, resolve, sep } from 'path'
 import { last, memoize } from 'lodash-es'
 import { logEvent } from '../services/statsig.js'
 import type { SetToolJSXFn, Tool, ToolUseContext } from '../Tool.js'
@@ -26,7 +26,7 @@ import {
   ToolUseBlock,
 } from '../provider/message-schema.js'
 import { setCwd } from './state.js'
-import { getCwd } from './state.js'
+import { getCwd, getOriginalCwd } from './state.js'
 import chalk from 'chalk'
 import * as React from 'react'
 import { UserBashInputMessage } from '../components/messages/UserBashInputMessage.js'
@@ -177,10 +177,22 @@ export async function processUserInput(
       const newCwd = resolve(oldCwd, input.slice(3))
       try {
         await setCwd(newCwd)
+        const canonicalCwd = getCwd()
+        const relativeToWorkspace = relative(getOriginalCwd(), canonicalCwd)
+        if (
+          relativeToWorkspace === '..' ||
+          relativeToWorkspace.startsWith(`..${sep}`) ||
+          isAbsolute(relativeToWorkspace)
+        ) {
+          await setCwd(oldCwd)
+          throw new Error(
+            `Directory is outside the trusted workspace: ${canonicalCwd}`,
+          )
+        }
         return [
           userMessage,
           createAssistantMessage(
-            `<bash-stdout>Changed directory to ${chalk.bold(`${newCwd}/`)}</bash-stdout>`,
+            `<bash-stdout>Changed directory to ${chalk.bold(`${canonicalCwd}/`)}</bash-stdout>`,
           ),
         ]
       } catch (e) {

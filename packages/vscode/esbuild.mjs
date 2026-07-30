@@ -83,6 +83,11 @@ const ctx = await esbuild.context({
   sourcemap: watch,
   minify: !watch,
   loader: { ".md": "text", ".txt": "text" },
+  logOverride: {
+    // @nexuscode/sandbox receives an explicit extension-owned trusted root.
+    // Its ESM-only default locator is bundled but never used by this CJS host.
+    "empty-import-meta": "silent",
+  },
 })
 
 if (watch) {

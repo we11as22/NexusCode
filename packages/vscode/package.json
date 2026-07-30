@@ -28,7 +28,7 @@
   "main": "./dist/extension.js",
   "scripts": {
     "build": "corepack pnpm build:ext && corepack pnpm build:webview",
-    "build:ext": "node esbuild.mjs",
+    "build:ext": "corepack pnpm --filter @nexuscode/sandbox build && node ../sandbox/scripts/copy-native.mjs . && node esbuild.mjs",
     "build:webview": "corepack pnpm --filter @nexuscode/webview-ui build",
     "package": "node scripts/svg-to-png.cjs && node scripts/package-vsix.cjs",
     "dev": "node esbuild.mjs --watch",
@@ -206,8 +206,8 @@
     "keybindings": [
       {
         "command": "nexuscode.openPanel",
-        "key": "ctrl+shift+n",
-        "mac": "cmd+shift+n"
+        "key": "ctrl+alt+n",
+        "mac": "cmd+alt+n"
       },
       {
         "command": "nexuscode.newTask",
@@ -457,6 +457,7 @@
     }
   },
   "dependencies": {
+    "@nexuscode/sandbox": "workspace:*",
     "@nexuscode/core": "workspace:*",
     "diff": "^7.0.0",
     "execa": "^9.5.0",

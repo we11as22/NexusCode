@@ -7,7 +7,7 @@ import { Message, query } from '../query.js'
 import { CanUseToolFn } from '../hooks/useCanUseTool.js'
 import { Tool } from '../Tool.js'
 import { getSlowAndCapableModel } from '../utils/model.js'
-import { setCwd } from './state.js'
+import { setCwd, setOriginalCwd } from './state.js'
 import { getMessagesPath, overwriteLog } from './log.js'
 import { createUserMessage } from './messages.js'
 
@@ -39,6 +39,7 @@ export async function ask({
   totalCost: number
   messageHistoryFile: string
 }> {
+  setOriginalCwd(cwd)
   await setCwd(cwd)
   const message = createUserMessage(prompt)
   const messages: Message[] = [message]

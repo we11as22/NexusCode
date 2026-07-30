@@ -66,7 +66,9 @@ export type {
 // Types
 export { MODES } from "./types.js"
 export type {
-  Mode, IHost, HostCapabilities, ISession, IIndexer, SkillAuthority,
+  Mode, IHost, HostCapabilities, HostSandboxCommandRequest,
+  HostSandboxCommandResult, HostSandboxProcess, HostSandboxStartOptions,
+  ISession, IIndexer, SkillAuthority,
   AgentEvent, ToolDef, ToolResult, ToolContext, ToolIntegrationProvenance,
   AgentExecutionIdentity, ToolExecutionIdentity,
   SessionMessage, ProviderContextAnchor, ToolPart, MessagePart, TextPart,

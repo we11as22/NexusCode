@@ -85,7 +85,7 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
       return
     }
 
-    this.panel = vscode.window.createWebviewPanel(
+    const panel = vscode.window.createWebviewPanel(
       "nexuscode.panel",
       "NexusCode",
       vscode.ViewColumn.Beside,
@@ -95,12 +95,24 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
         localResourceRoots: [this.context.extensionUri],
       }
     )
+    this.attachPanel(panel)
+  }
 
-    this.setupWebview(this.panel.webview)
+  async restorePanel(panel: vscode.WebviewPanel): Promise<void> {
+    this.debugLog("restorePanel")
+    this.panel?.dispose()
+    this.attachPanel(panel)
+  }
+
+  private attachPanel(panel: vscode.WebviewPanel): void {
+    this.panel = panel
+    this.setupWebview(panel.webview)
     void this.controller.ensureInitialized()
 
-    this.panel.onDidDispose(() => {
-      this.panel = undefined
+    panel.onDidDispose(() => {
+      if (this.panel === panel) {
+        this.panel = undefined
+      }
     }, null, this.disposables)
   }
 
@@ -108,9 +120,11 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
     this.controller.postStateToWebview(true)
   }
 
-  private markWebviewReady(webview: vscode.Webview): void {
+  private markWebviewReady(webview: vscode.Webview): boolean {
+    if (this.readyWebviews.get(webview) === true) return false
     this.readyWebviews.set(webview, true)
     this.debugLog("webview marked ready")
+    return true
   }
 
   private markWebviewNotReady(webview: vscode.Webview): void {
@@ -288,9 +302,14 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
         )
         return
       }
-      this.markWebviewReady(webview)
+      const becameReady = this.markWebviewReady(webview)
       await this.flushPendingMessages(webview)
-      await this.replayLatestMessages(webview)
+      if (becameReady) {
+        await this.replayLatestMessages(webview)
+      }
+      if (!becameReady && inbound.message.type === "webviewDidLaunch") {
+        return
+      }
       try {
         await this.controller.handleWebviewMessage(inbound.message)
       } catch (error) {

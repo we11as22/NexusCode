@@ -1,6 +1,5 @@
 import { z } from "zod"
 import { randomUUID } from "node:crypto"
-import { spawn, spawnSync, type ChildProcess } from "node:child_process"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import * as os from "node:os"
@@ -15,6 +14,7 @@ import {
   isLikelyLongRunningShellCommand,
 } from "./shell-safety.js"
 import { interpretShellCommandResult } from "./shell-command-semantics.js"
+import { consumeSandboxEscalationGrant } from "../../agent/sandbox-escalation.js"
 
 /** Max size of saved full output file (OpenCode-style disk protection). */
 const MAX_TOOL_OUTPUT_FILE_BYTES = 50 * 1024 * 1024 // 50 MB
@@ -28,64 +28,17 @@ const RUN_LOG_RETENTION_MS = 7 * 24 * 60 * 60 * 1000 // 7 days
 const BACKGROUND_STOP_GRACE_MS = 1_000
 const LOG_TRUNCATION_MARKER =
   "\n[Background output truncated at the 50 MiB safety limit]\n"
-const BOUNDED_LOG_RUNNER = String.raw`
-const fs = require("node:fs")
-const { spawn } = require("node:child_process")
-const input = JSON.parse(
-  Buffer.from(process.argv[1], "base64url").toString("utf8"),
-)
-const marker = Buffer.from(input.marker, "utf8")
-const payloadLimit = input.maxBytes - marker.byteLength
-const logFd = fs.openSync(input.logPath, "r+")
-fs.ftruncateSync(logFd, 0)
-let written = 0
-let truncated = false
-let finished = false
-const append = (chunk) => {
-  if (!Buffer.isBuffer(chunk)) chunk = Buffer.from(chunk)
-  const remaining = payloadLimit - written
-  if (remaining <= 0) {
-    truncated = truncated || chunk.byteLength > 0
-    return
-  }
-  const take = Math.min(remaining, chunk.byteLength)
-  if (take > 0) {
-    fs.writeSync(logFd, chunk, 0, take)
-    written += take
-  }
-  if (take < chunk.byteLength) truncated = true
-}
-const finish = (code) => {
-  if (finished) return
-  finished = true
-  if (truncated) fs.writeSync(logFd, marker)
-  fs.closeSync(logFd)
-  process.exitCode = Number.isInteger(code) ? code : 1
-}
-const child = spawn(input.command, [], {
-  shell: true,
-  cwd: input.cwd,
-  env: process.env,
-  stdio: ["ignore", "pipe", "pipe"],
-  windowsHide: true,
-})
-child.stdout.on("data", append)
-child.stderr.on("data", append)
-child.once("error", () => finish(1))
-child.once("close", (code) => finish(code))
-for (const signal of ["SIGTERM", "SIGINT"]) {
-  process.once(signal, () => {
-    try {
-      child.kill(signal)
-    } catch {}
-  })
-}
-`
 
 type BackgroundProcessOutcome = {
   code: number | null
   signal: NodeJS.Signals | null
   error?: Error
+  sandbox?: {
+    kind: string
+    denied: boolean
+    timedOut: boolean
+    setupError?: { code: string; message: string }
+  }
 }
 
 /** Short path for display (e.g. ~/.nexus/data/run/run_123.log). */
@@ -141,39 +94,39 @@ async function compactCompletedLog(logPath: string): Promise<void> {
   }
 }
 
-function spawnBackgroundProcess(args: {
-  command: string
-  cwd: string
-  logPath: string
-  processIdentity: string
-}): ChildProcess {
-  const logFd = fs.openSync(args.logPath, "wx", 0o600)
-  fs.closeSync(logFd)
-  const input = Buffer.from(JSON.stringify({
-    command: args.command,
-    cwd: args.cwd,
-    logPath: args.logPath,
-    marker: LOG_TRUNCATION_MARKER,
-    maxBytes: MAX_TOOL_OUTPUT_FILE_BYTES,
-  })).toString("base64url")
-  return spawn(
-    process.execPath,
-    [
-      "-e",
-      BOUNDED_LOG_RUNNER,
-      input,
-    ],
-    {
-      cwd: args.cwd,
-      detached: process.platform !== "win32",
-      stdio: "ignore",
-      windowsHide: true,
-      env: {
-        ...process.env,
-        NEXUS_BACKGROUND_PROCESS_IDENTITY: args.processIdentity,
-      },
+function createBoundedBackgroundLog(logPath: string): {
+  append(chunk: string): void
+  close(): void
+} {
+  const logFd = fs.openSync(logPath, "wx", 0o600)
+  const marker = Buffer.from(LOG_TRUNCATION_MARKER, "utf8")
+  const payloadLimit = MAX_TOOL_OUTPUT_FILE_BYTES - marker.byteLength
+  let written = 0
+  let truncated = false
+  let closed = false
+  return {
+    append(chunk: string) {
+      if (closed) return
+      const bytes = Buffer.from(chunk, "utf8")
+      const remaining = payloadLimit - written
+      if (remaining <= 0) {
+        truncated ||= bytes.byteLength > 0
+        return
+      }
+      const take = Math.min(remaining, bytes.byteLength)
+      if (take > 0) {
+        fs.writeSync(logFd, bytes, 0, take)
+        written += take
+      }
+      if (take < bytes.byteLength) truncated = true
     },
-  )
+    close() {
+      if (closed) return
+      closed = true
+      if (truncated) fs.writeSync(logFd, marker)
+      fs.closeSync(logFd)
+    },
+  }
 }
 
 function waitForProcessOutcome(
@@ -219,60 +172,85 @@ export async function startBackgroundShellTask(args: {
   const taskId = `run_${Date.now()}_${randomUUID().replace(/-/g, "").slice(0, 12)}`
   const logPath = path.join(runDir, `${taskId}.log`)
   const processIdentity = randomUUID()
-  const child = spawnBackgroundProcess({
-    command: args.command,
-    cwd: args.cwd,
-    logPath,
-    processIdentity,
-  })
-  child.unref()
-  const pid = child.pid ?? 0
+  if (!args.host.startSandboxedCommand) {
+    throw new Error(
+      "Nexus OS sandbox background execution is unavailable in this host",
+    )
+  }
+  const log = createBoundedBackgroundLog(logPath)
+  let processHandle: ReturnType<
+    NonNullable<typeof args.host.startSandboxedCommand>
+  >
+  try {
+    processHandle = args.host.startSandboxedCommand(
+      {
+        executionId: `background:${args.sessionId}:${taskId}:${processIdentity}`,
+        command: args.command,
+        cwd: args.cwd,
+        workspaceRoots: [args.host.cwd || args.cwd],
+        profile: "workspace-write",
+        network: "restricted",
+        timeoutMs: 0,
+      },
+      {
+        maxOutputBytes: 0,
+        onStdout: (chunk) => log.append(chunk),
+        onStderr: (chunk) => log.append(chunk),
+      },
+    )
+  } catch (error) {
+    log.close()
+    await fs.promises.unlink(logPath).catch(() => undefined)
+    throw error
+  }
+  const pid = processHandle.pid
   if (!Number.isSafeInteger(pid) || pid <= 0) {
-    child.kill("SIGKILL")
+    processHandle.stop()
+    log.close()
+    await fs.promises.unlink(logPath).catch(() => undefined)
     throw new Error("Background process did not receive a valid process id")
   }
 
-  const completion = new Promise<BackgroundProcessOutcome>((resolve) => {
-    let settled = false
-    const settle = (outcome: BackgroundProcessOutcome): void => {
-      if (settled) return
-      settled = true
-      resolve(outcome)
-    }
-    child.once("error", (error) => {
-      settle({ code: null, signal: null, error })
-    })
-    child.once("close", (code, signal) => {
-      settle({ code, signal })
-    })
-  })
-
-  const terminate = (signal: NodeJS.Signals): boolean => {
-    if (child.exitCode !== null || child.signalCode !== null) return false
-    if (process.platform === "win32") {
-      const result = spawnSync(
-        "taskkill",
-        ["/pid", String(pid), "/t", "/f"],
-        {
-          stdio: "ignore",
-          windowsHide: true,
-          timeout: BACKGROUND_STOP_GRACE_MS,
+  let completionSettled = false
+  const completion = processHandle.completion.then(
+    (result): BackgroundProcessOutcome => {
+      completionSettled = true
+      log.close()
+      return {
+        code: result.exitCode,
+        signal: null,
+        sandbox: {
+          kind: result.sandbox,
+          denied: result.denied,
+          timedOut: result.timedOut,
+          ...(result.setupError ? { setupError: result.setupError } : {}),
         },
-      )
-      return result.status === 0
-    }
-    try {
-      process.kill(-pid, signal)
-      return true
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ESRCH") return false
-      try {
-        return child.kill(signal)
-      } catch {
-        return false
       }
-    }
+    },
+    (error): BackgroundProcessOutcome => {
+      completionSettled = true
+      log.close()
+      return {
+        code: null,
+        signal: null,
+        error: error instanceof Error ? error : new Error(String(error)),
+      }
+    },
+  )
+
+  const readySandbox = await processHandle.ready
+  if (!readySandbox) {
+    const failed = await completion
+    await fs.promises.unlink(logPath).catch(() => undefined)
+    throw new Error(
+      failed.sandbox?.setupError?.message ??
+        failed.error?.message ??
+        "Nexus OS sandbox did not confirm background policy activation",
+    )
   }
+
+  const terminate = (_signal: NodeJS.Signals): boolean =>
+    processHandle.stop()
 
   let runtimePromise!: Promise<
     ToolContext["services"]["orchestrationRuntime"]
@@ -332,6 +310,16 @@ export async function startBackgroundShellTask(args: {
             ? { returnCodeInterpretation: interpretation.message }
             : {}),
           ...(outcome.signal ? { signal: outcome.signal } : {}),
+          ...(outcome.sandbox
+            ? {
+                sandbox: outcome.sandbox.kind,
+                sandboxDenied: outcome.sandbox.denied,
+                sandboxTimedOut: outcome.sandbox.timedOut,
+                ...(outcome.sandbox.setupError
+                  ? { sandboxSetupError: outcome.sandbox.setupError.code }
+                  : {}),
+              }
+            : {}),
           ...(effectiveStopReason
             ? { stopReason: effectiveStopReason }
             : {}),
@@ -379,14 +367,14 @@ export async function startBackgroundShellTask(args: {
     if (stopPromise) return stopPromise
     requestedStopReason = reason
     stopPromise = (async () => {
-      if (child.exitCode === null && child.signalCode === null) {
+      if (!completionSettled) {
         terminationWasRequested = terminate("SIGTERM")
       }
       let outcome = await waitForProcessOutcome(
         completion,
         BACKGROUND_STOP_GRACE_MS,
       )
-      if (!outcome && child.exitCode === null && child.signalCode === null) {
+      if (!outcome && !completionSettled) {
         terminationWasRequested =
           terminate("SIGKILL") || terminationWasRequested
         outcome = await waitForProcessOutcome(
@@ -400,8 +388,8 @@ export async function startBackgroundShellTask(args: {
         )
         await finalize(
           {
-            code: child.exitCode,
-            signal: child.signalCode,
+            code: null,
+            signal: null,
             error,
           },
           { forcedStatus: "failed", stopReason: reason },
@@ -631,14 +619,80 @@ Return the PR URL when done. Do NOT push unless explicitly asked.`,
 
     const timeout = timeoutMs ?? DEFAULT_TIMEOUT
 
-    let result: { stdout: string; stderr: string; exitCode: number }
+    if (!ctx.host.runSandboxedCommand) {
+      return {
+        success: false,
+        output:
+          "Nexus OS sandbox is unavailable in this host. The command was not executed.",
+        metadata: {
+          sandboxSetupError: "sandbox_host_capability_unavailable",
+        },
+      }
+    }
+
+    const identity = ctx.executionIdentity
+    const executionId = identity
+      ? [
+          identity.runId,
+          identity.messageId,
+          identity.partId,
+          identity.toolCallId,
+        ].join(":")
+      : [
+          "legacy",
+          ctx.session?.id ?? "unknown-session",
+          ctx.toolExecutionMessageId ?? "unknown-message",
+          ctx.partId ?? "unknown-part",
+        ].join(":")
+
+    let result: Awaited<
+      ReturnType<NonNullable<typeof ctx.host.runSandboxedCommand>>
+    >
     try {
       const ac = new AbortController()
+      const abortFromParent = () => ac.abort(ctx.signal.reason)
+      if (ctx.signal.aborted) abortFromParent()
+      else ctx.signal.addEventListener("abort", abortFromParent, { once: true })
       const timeoutId = setTimeout(() => ac.abort(), timeout)
       try {
-        result = await ctx.host.runCommand(command, workingDir, ac.signal)
+        const escalationGrant = (
+          ctx as ToolContext & { sandboxEscalationGrant?: unknown }
+        ).sandboxEscalationGrant
+        if (
+          consumeSandboxEscalationGrant(escalationGrant, {
+            executionId,
+            command,
+            cwd: workingDir,
+          })
+        ) {
+          const escalated = await ctx.host.runCommand(
+            command,
+            workingDir,
+            ac.signal,
+          )
+          result = {
+            ...escalated,
+            sandbox: "none",
+            timedOut: false,
+            denied: false,
+          }
+        } else {
+          result = await ctx.host.runSandboxedCommand(
+            {
+              executionId,
+              command,
+              cwd: workingDir,
+              workspaceRoots: [ctx.host.cwd || workingDir],
+              profile: ctx.mode === "ask" ? "read-only" : "workspace-write",
+              network: "restricted",
+              timeoutMs: timeout,
+            },
+            ac.signal,
+          )
+        }
       } finally {
         clearTimeout(timeoutId)
+        ctx.signal.removeEventListener("abort", abortFromParent)
       }
     } catch (err: unknown) {
       const e = err as NodeJS.ErrnoException & { stdout?: string; stderr?: string; exitCode?: number }
@@ -652,6 +706,22 @@ Return the PR URL when done. Do NOT push unless explicitly asked.`,
         stdout: (e as { stdout?: string }).stdout ?? "",
         stderr: (e as { stderr?: string }).stderr ?? (err as Error).message,
         exitCode: (e as { exitCode?: number }).exitCode ?? 1,
+        sandbox: "none",
+        timedOut: false,
+        denied: false,
+      }
+    }
+
+    if (result.setupError) {
+      return {
+        success: false,
+        output:
+          `Nexus OS sandbox could not start (${result.setupError.code}). ` +
+          `The command was not executed: ${result.setupError.message}`,
+        metadata: {
+          sandboxSetupError: result.setupError.code,
+          sandbox: result.sandbox,
+        },
       }
     }
 
@@ -669,6 +739,11 @@ Return the PR URL when done. Do NOT push unless explicitly asked.`,
         fullOutput,
       metadata: {
         ...(interpretation.message ? { returnCodeInterpretation: interpretation.message } : {}),
+        sandbox: result.sandbox,
+        sandboxDenied: result.denied,
+        sandboxTimedOut: result.timedOut,
+        sandboxExecutionId: executionId,
+        sandboxEscalated: result.sandbox === "none",
       },
     }
   },

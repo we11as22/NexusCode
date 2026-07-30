@@ -1,6 +1,6 @@
 # Сравнение NexusCode с эталонными агентами
 
-**Дата аудита:** 2026-07-29
+**Дата аудита:** 2026-07-30
 
 **Сравниваемые исходные проекты:** Codex, OpenClaude, Kilo Code, Roo Code,
 Cline, OpenCode, Claw Code, Kimi Code, Kimi CLI, MiMo Code и Qwen Code.
@@ -67,7 +67,7 @@ TypeScript-ядро для CLI, VS Code и сервера и заимствуе�
 | Компакция | Порог от реального окна модели, микрокомпакция и ограниченное LLM-резюме старой головы с дословно сохранённым свежим хвостом, CAS-сохранение и непрерывность памяти | Codex, OpenClaude, Kilo, Kimi CLI, Qwen | Реализовано; автоматический порог — минимум из 85% окна и резерва 20k, бюджет summarizer зависит от модели, сбой не уничтожает диалог, а режим, активные навыки, задачи, memory/artifact-ссылки проецируются повторно |
 | Сессии | Защищённый контрольными суммами JSONL-транскрипт и встроенная SQLite-координация с транзакциями, восстановлением, миграциями и ограниченным активным контекстом | Codex, OpenCode, MiMo | Реализовано; JSONL остаётся переносимой историей, а SQLite управляет арендой, приёмом запросов, разрешениями, очередями, повторным воспроизведением и оркестрацией |
 | Удалённые запуски | Аутентифицированный NDJSON, долговечное воспроизведение событий, переподключение по sequence, клиентский outbox до запроса, точная идентичность хода, явная отмена и подтверждения | Codex, OpenCode, Kimi Code | Реализовано; каноническая команда сохраняется до POST, приём идемпотентен, точное терминальное воспроизведение переживает потерянный ответ и гонки queued/active/terminal после перезапуска, а ошибочный или истёкший курсор не может навсегда заблокировать интерфейс |
-| Разрешения | Политика режима, упорядоченные правила, проверки путей и команд, сериализованные интерактивные подтверждения, fail-closed сервер | Codex, OpenCode, Claw | Реализовано на границе приложения; `@file`/`@folder` проходят host-authority, а `@url`/`@git` не выполняют скрытый I/O при сборке промпта; привилегированные действия плагинов и хуков не наследуют разрешение на чтение; песочница процессов ОС остаётся отдельным пробелом |
+| Разрешения и песочница | Политика режима, упорядоченные правила, проверки путей и команд, сериализованные подтверждения, sandbox-first выполнение и отдельный точный one-shot retry | Codex, OpenCode, Claw | Все локальные shell-пути CLI, VS Code и server используют один Nexus-owned native broker; обычное разрешение не означает запуск без песочницы, а one-shot capability нельзя подделать, повторить или сохранить как `always allow`. macOS Seatbelt проверен на реальном host; Linux bwrap/seccomp собран и покрыт policy-тестами, но ещё не прогнан на реальном Linux; Windows restricted-token backend пока fail-closed |
 | Жизненный цикл инструментов и большой вывод | Валидация, нормализация, хуки, тайм-аут/отмена, ограниченные превью, долговечное вынесение и чтение вывода, события задач | Codex, Kilo, OpenClaude, MiMo | Реализовано для всех текстовых результатов через единый pipeline: preview до 2000 строк/50 KiB, приватный session-owned артефакт до 50 MiB вне проекта, ограниченный `ToolOutputRead`, семидневная очистка без удаления ещё цитируемых артефактов |
 | Субагенты | Делегированные запуски от задачи, пакеты, снимки, возобновление, изоляция worktree и суженные режимы | OpenClaude, Codex, Kimi CLI, Qwen | Реализовано; роль является системным контрактом и переживает resume/компакцию, Explore/Plan по умолчанию read-only, более строгий родитель сужает возобновляемого агента до ask, запросы разрешений сериализуются |
 | Команды и оркестрация | Долговечные задачи, команды, входящие сообщения, участники, сообщения, worktree и удалённые сессии | OpenClaude | Реализовано через снимок с контрольной суммой и журнал |
@@ -321,9 +321,10 @@ SQLite FTS/индекса не оправдано без измеренной п
 Аудит завершён на закреплённой в репозитории Node `24.18.0`, а не на старой
 версии Node, изначально доступной в shell пользователя:
 
-- typecheck монорепозитория прошёл во всех шести исполняемых workspace-пакетах;
-- 1840 тестов монорепозитория прошли в пакетах core, state, webview, CLI, server
-  и VS Code;
+- typecheck монорепозитория прошёл во всех семи исполняемых workspace-пакетах;
+- 1895 тестов монорепозитория прошли в пакетах sandbox, core, state, webview,
+  CLI, server и VS Code; ещё два host-native теста намеренно пропускаются в
+  обычном вложенном sandbox-прогоне;
 - полная production-сборка прошла, включая проверки импорта встроенной SQLite
   из `dist`;
 - набор проверок переносимости рантайма/хранилища и безопасной инкрементальной
@@ -331,8 +332,8 @@ SQLite FTS/индекса не оправдано без измеренной п
 - детерминированная перепись возможностей: 243 заявленные исполняемые функции,
   список пересоздан и проверен на актуальность;
 - end-to-end-проверка MCP/навыков прошла;
-- VSIX упакован со 168 файлами, включая ресурсы Tree-sitter и
-  кроссплатформенный компилятор пользовательских инструментов;
+- VSIX упакован со 169 файлами, включая native helper macOS, ресурсы
+  Tree-sitter и кроссплатформенный компилятор пользовательских инструментов;
 - свежий VSIX установлен в настоящий VS Code, окно Extension Host
   перезагружено, а создание двух последовательных пустых сессий подтвердило
   независимость истории без вывода технических идентификаторов пользователю;
@@ -395,6 +396,16 @@ SQLite FTS/индекса не оправдано без измеренной п
   отдельный переход в полную историю, при этом активная старая сессия остаётся
   достижимой; пустые сессии показываются как `Untitled session`, без внутренних
   ID;
+- свежий Extension Host выявил и подтвердил исправление двойного ready-handshake:
+  `getState` делает webview готовым и проигрывает cached snapshots один раз, а
+  совместимый `webviewDidLaunch` больше не запускает второй replay. Отдельный
+  регрессионный тест воспроизводит обе входящие команды и проверяет количество
+  доставленных snapshot-сообщений;
+- конфликт с системной клавишей нового окна `Cmd/Ctrl+Shift+N` устранён:
+  NexusCode использует `Cmd+Alt+N` на macOS и `Ctrl+Alt+N` на остальных
+  платформах. В чистом Cursor workspace `/Users/mac/Projects/nexus/test`
+  повторное нажатие фокусирует единственную вкладку NexusCode и не создаёт
+  соседний Agent/editor;
 - Stock Ink в CLI теперь использует OpenClaude-подобное устойчивое окно живого
   transcript: целевой хвост 200 строк, сдвигаемый после 50 строк запаса, вместо
   перерисовки до 1000 React/Yoga-узлов на каждый spinner tick. Полная история
@@ -404,9 +415,9 @@ SQLite FTS/индекса не оправдано без измеренной п
   аутентифицированный список сессий в пределах workspace.
 - обе пользовательские команды установки проверены end-to-end: CLI-инсталлятор
   нашёл Node `24.18.0`, даже когда первым в `PATH` был Node 20, установил
-  временный wrapper и прошёл `doctor`; extension-инсталлятор собрал все пакеты,
-  упаковал 168-файловый VSIX, нашёл обычный или macOS-translocated VS Code,
-  установил и подтвердил `nexuscode.nexuscode@0.1.0`.
+  временный wrapper и прошёл `doctor`; единый установщик собрал все пакеты,
+  упаковал 169-файловый VSIX с native helper, установил его в Cursor и
+  подтвердил `nexuscode.nexuscode@0.1.0`.
 
 Для реальных запросов Nexus использовалась только настроенная бесплатная модель
 Kilo. Не выполнялись прямые платные запросы Nexus, разрушительное восстановление
@@ -419,14 +430,18 @@ workspace,
 
 Они не скрыты за маркетинговыми формулировками:
 
-1. **Песочница команд на уровне ОС.** В Nexus есть ограничение путей, политика
-   команд, подтверждения, корни workspace на сервере, отмена и проверки
-   Docker-only bypass разрешений. Песочницы уровня Codex для каждой локальной
-   команды пока нет.
-2. **Изоляция возможностей плагинов.** Плагины требуют явного доверия и
-   объявленных путей, но доверенный хук всё ещё выполняется с правами ОС
-   host-процесса. Нужны мелкозернистые capability-разрешения и изолированный
-   runner.
+1. **Полный кроссплатформенный паритет песочницы.** На macOS нативный Seatbelt
+   broker проверен end-to-end. Linux-реализация с bundled Bubblewrap, seccomp,
+   `no_new_privs`, изоляцией пространств имён и очисткой опасных переменных
+   окружения собрана для arm64/x64 и покрыта тестами построения политики, но
+   ещё не запускалась на настоящем Linux-host. Windows helper собирается, но
+   restricted-token/job-object backend пока намеренно возвращает ошибку и не
+   допускает скрытого unsandboxed fallback.
+2. **Изоляция возможностей плагинов.** Командные plugin hooks теперь проходят
+   тот же sandbox broker, что Bash и фоновые процессы, а mutation-инструменты
+   требуют отдельного подтверждения. Однако произвольный JavaScript доверенного
+   плагина всё ещё исполняется внутри изолированного worker-процесса, а не в
+   отдельном kernel sandbox с полностью декларативным capability ABI.
 3. **Интерактивный браузер.** У Cline есть настоящий сервис Chrome/Puppeteer.
    Nexus намеренно предоставляет только WebSearch/WebFetch, если не установлен
    браузерный плагин или MCP-инструмент.
@@ -451,10 +466,10 @@ workspace,
    Дальнейшее выделение компонентов должно сохранять поведение и опираться на
    реальные host-тесты, а не на умозрительную перепись.
 
-Первые два пункта — следующий архитектурный этап с наибольшей ценностью. Для
-них нужен настоящий платформенный брокер процессов и изолированный runner
-плагинов, а не ещё один флаг на уровне приложения. Встроенный браузер и SQLite
-не являются обязательными условиями надёжного программирования.
+Первые два пункта — следующий архитектурный этап с наибольшей ценностью:
+нативная проверка Linux, restricted-token backend Windows и дальнейшее сужение
+ABI плагинов. Встроенный браузер и SQLite не являются обязательными условиями
+надёжного программирования.
 
 ## Чем получившаяся архитектура Nexus отличается от остальных
 
@@ -485,7 +500,7 @@ Nexus объединяет возможности, которые обычно �
 | Лента VS Code, автоскролл и live/snapshot reconciliation | Kilo `packages/ui/src/hooks/create-auto-scroll.tsx` и `packages/kilo-vscode/webview-ui/src/components/chat/MessageList.tsx`; Codex item/message identity; OpenClaude streaming refs; Roo `webview-ui` Virtuoso lifecycle как пример сложности, которую не следует переносить без необходимости | `packages/vscode/webview-ui/src/components/MessageList.tsx`; `packages/vscode/webview-ui/src/components/native-scroll-policy.ts`; `packages/vscode/webview-ui/src/transcript/helpers.ts`; `packages/vscode/webview-ui/src/stores/chat.ts`; соответствующие тесты рядом |
 | Потоковый TUI, очередь и ограничение перерисовок | Codex `codex-rs/tui/src/streaming/controller.rs`; OpenClaude `src/components/Messages.tsx` и `VirtualMessageList.tsx`; Kimi Code `apps/kimi-code/src/tui/controllers/streaming-ui.ts` и `editor-keyboard.ts`; Qwen Code `packages/cli/src/ui/hooks/useGeminiStream.ts` и `utils/MarkdownDisplay.tsx` | `packages/cli/src/nexus-message-projection.ts`; `packages/cli/src/cli-render-window.ts`; `packages/cli/src/prompt-queue.ts`; `packages/cli/src/cancel-policy.ts`; `packages/cli/src/event-waiter.ts`; `packages/cli/src/components/Spinner.tsx`; `packages/cli/src/screens/REPL.tsx` |
 | Компакция | `source_projects/codex/codex-rs/core/src/compact.rs`; `source_projects/kilocode/packages/core/src/session/compaction.ts`; `source_projects/kimi-cli/src/kimi_cli/soul/compaction.py` | `packages/core/src/session/compaction.ts`; `packages/core/src/context/compaction-projection.ts` |
-| Песочница и разрешения | `source_projects/codex/codex-rs/core/src/tools/sandboxing.rs`; `source_projects/codex/codex-rs/core/src/tools/approvals.rs`; `source_projects/kilocode/packages/core/src/permission.ts`; `source_projects/MiMo-Code/SECURITY.md` | `packages/core/src/agent/approval-coordinator.ts`; `packages/core/src/agent/mode-input-policy.ts`; `packages/core/src/agent/tool-execution.ts`; реализации хостов в `packages/cli/src/host.ts`, `packages/vscode/src/host.ts` и `packages/server/src/host.ts` |
+| Песочница и разрешения | `source_projects/codex/codex-rs/core/src/tools/orchestrator.rs`; `source_projects/codex/codex-rs/core/src/tools/sandboxing.rs`; `source_projects/codex/codex-rs/process-hardening/src/lib.rs`; `source_projects/codex/codex-rs/sandboxing`; `source_projects/codex/codex-rs/windows-sandbox-rs`; `source_projects/kilocode/packages/core/src/permission.ts`; `source_projects/MiMo-Code/SECURITY.md` | `native/sandbox`; `packages/sandbox`; `packages/core/src/agent/sandbox-escalation.ts`; `packages/core/src/agent/approval-coordinator.ts`; `packages/core/src/agent/tool-execution.ts`; `packages/cli/src/host.ts`; `packages/vscode/src/host.ts`; `packages/server/src/host.ts` |
 | Субагенты и оркестрация | `source_projects/codex/codex-rs/core/src/tools/handlers/multi_agents.rs`; `source_projects/openclaude/src/tools/AgentTool`; `source_projects/kimi-cli/src/kimi_cli/subagents`; `source_projects/qwen-code/packages/core/src/agents/runtime` | `packages/core/src/agent/parallel.ts`; `packages/core/src/orchestration/runtime.ts`; `packages/core/src/orchestration/agents.ts`; `packages/core/src/tools/built-in/orchestration-tools.ts` |
 | Память и навыки | `source_projects/openclaude/src/tools/AgentTool/agentMemory.ts`; `source_projects/openclaude/src/memdir`; `source_projects/openclaude/src/skills`; `source_projects/MiMo-Code/packages/opencode/src/tool/memory.ts` | `packages/core/src/context/auto-memory.ts`; `packages/core/src/session/session-memory.ts`; `packages/core/src/context/team-memory.ts`; `packages/core/src/memory/retrieval.ts`; `packages/core/src/skills/manager.ts` |
 | MCP, плагины и отложенное обнаружение | `source_projects/openclaude/src/plugins`; `source_projects/openclaude/src/skills/mcpSkills.ts`; `source_projects/qwen-code/packages/core/src/tools/mcp-transport-pool.ts`; `source_projects/MiMo-Code/packages/opencode/src/tool/mcp-tool-search.ts`; Kimi Code `packages/agent-core-v2/src/app/plugin` | `packages/core/src/mcp/client.ts`; `packages/core/src/mcp/transport-factory.ts`; `packages/core/src/plugins/runtime.ts`; `packages/core/src/plugins/capabilities.ts`; `packages/core/src/skills/skill-tool-catalog.ts` |

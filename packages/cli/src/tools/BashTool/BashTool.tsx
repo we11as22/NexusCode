@@ -1,4 +1,5 @@
 import { statSync } from 'fs'
+import { randomUUID } from 'node:crypto'
 import { EOL } from 'os'
 import { isAbsolute, relative, resolve } from 'path'
 import * as React from 'react'
@@ -10,12 +11,11 @@ import { Tool, ValidationResult } from '../../Tool.js'
 import { splitCommand } from '../../utils/commands.js'
 import { isInDirectory } from '../../utils/file.js'
 import { logError } from '../../utils/log.js'
-import { PersistentShell } from '../../utils/PersistentShell.js'
 import { getCwd, getOriginalCwd } from '../../utils/state.js'
+import { CliHost } from '../../host.js'
 import BashToolResultMessage from './BashToolResultMessage.js'
 import { BANNED_COMMANDS, PROMPT } from './prompt.js'
 import { formatOutput, getCommandFilePaths } from './utils.js'
-import { logEvent } from '../../services/statsig.js'
 
 export const inputSchema = z.strictObject({
   command: z.string().describe('The command to execute'),
@@ -158,23 +158,32 @@ export const BashTool = {
     let stdout = ''
     let stderr = ''
 
-    // Execute commands
-    const result = await PersistentShell.getInstance().exec(
-      command,
+    // Keep the compatibility renderer/tool contract, but execute through the
+    // same fail-closed native broker as the Nexus core Bash tool. The old
+    // persistent login shell escaped the OS sandbox and leaked a child process
+    // for the lifetime of every CLI invocation.
+    const host = new CliHost(getOriginalCwd(), () => {})
+    const result = await host.runSandboxedCommand(
+      {
+        executionId: `cli-shell-${randomUUID()}`,
+        command,
+        cwd: getCwd(),
+        workspaceRoots: [getOriginalCwd()],
+        profile: 'workspace-write',
+        network: 'restricted',
+        timeoutMs: Math.min(Math.max(timeout, 1), 600_000),
+      },
       abortController.signal,
-      timeout,
     )
+    if (result.setupError) {
+      throw new Error(
+        `OS sandbox setup failed (${result.setupError.code}): ${result.setupError.message}`,
+      )
+    }
     stdout += (result.stdout || '').trim() + EOL
     stderr += (result.stderr || '').trim() + EOL
-    if (result.code !== 0) {
-      stderr += `Exit code ${result.code}`
-    }
-
-    if (!isInDirectory(getCwd(), getOriginalCwd())) {
-      // Shell directory is outside original working directory, reset it
-      await PersistentShell.getInstance().setCwd(getOriginalCwd())
-      stderr = `${stderr.trim()}${EOL}Shell cwd was reset to ${getOriginalCwd()}`
-      logEvent('bash_tool_reset_to_original_dir', {})
+    if (result.exitCode !== 0) {
+      stderr += `Exit code ${result.exitCode}`
     }
 
     // Update read timestamps for any files referenced by the command
@@ -208,7 +217,7 @@ export const BashTool = {
       stdoutLines,
       stderr: stderrContent,
       stderrLines,
-      interrupted: result.interrupted,
+      interrupted: abortController.signal.aborted || result.timedOut,
     }
 
     yield {

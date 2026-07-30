@@ -14,13 +14,14 @@
     }
   },
   "scripts": {
-    "build": "tsup src/index.ts src/cli.ts --format esm --dts --target node24 --outDir dist",
+    "build": "corepack pnpm --filter @nexuscode/sandbox build && node ../sandbox/scripts/copy-native.mjs . && tsup src/index.ts src/cli.ts --format esm --dts --target node24 --outDir dist",
     "dev": "tsup src/index.ts --format esm --dts --target node24 --outDir dist --watch",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
   "dependencies": {
     "@nexuscode/core": "workspace:*",
+    "@nexuscode/sandbox": "workspace:*",
     "@nexuscode/state": "workspace:*",
     "@hono/node-server": "^1.13.0",
     "execa": "^9.5.0",

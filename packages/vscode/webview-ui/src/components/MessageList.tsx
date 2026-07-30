@@ -17,7 +17,9 @@ import { postMessage } from "../vscode.js"
 import type { SessionMessage, MessagePart, ToolPart } from "../stores/chat.js"
 import type { SubAgentState } from "../stores/chat.js"
 import {
+  approvalActionLabel,
   approvalActionPath,
+  approvalActionWarning,
   type ApprovalActionView,
 } from "../types/approval.js"
 import { useChatStore } from "../stores/chat.js"
@@ -68,14 +70,12 @@ function ApprovalInline({
   const [showRedirect, setShowRedirect] = useState(false)
   const [redirectText, setRedirectText] = useState("")
   const supportsScopedApproval = !useChatStore((s) => Boolean(s.serverUrl))
+  const canPersistApproval =
+    supportsScopedApproval && action.type !== "sandbox_escalation"
   const reviewPath = approvalActionPath(action)
 
-  const label =
-    action.type === "execute"
-      ? (action.content ? `Run: ${action.content}` : action.description)
-      : action.type === "write"
-        ? `Edit: ${action.description}`
-        : action.description
+  const label = approvalActionLabel(action)
+  const warning = approvalActionWarning(action)
 
   const submitRedirect = () => {
     const trimmed = redirectText.trim()
@@ -124,6 +124,14 @@ function ApprovalInline({
           </span>
         )}
       </div>
+      {warning ? (
+        <div
+          className="pl-[17px] text-[10px] leading-4 text-[var(--vscode-descriptionForeground)]"
+          title={warning}
+        >
+          {warning}
+        </div>
+      ) : null}
       {/* Action buttons row */}
       <div className="flex items-center gap-1 flex-wrap">
         {action.type === "write" && reviewPath ? (
@@ -137,7 +145,7 @@ function ApprovalInline({
           </button>
         ) : null}
         <button type="button" className={BTN_ALLOW} onClick={() => onResolve(true)} title="Allow once">✓ Allow</button>
-        {supportsScopedApproval && (
+        {canPersistApproval && (
           <>
             <button type="button" className={BTN_ALLOW} onClick={() => onResolve(true, true)} title="Always allow this tool">∞ Always</button>
             <button type="button" className={BTN_NEUTRAL} onClick={() => onResolve(true, false, undefined, true)} title="Allow all for this session">⌀ Session</button>
