@@ -606,9 +606,21 @@ export {
 } from "./models/catalog.js"
 export type { ModelsCatalog, CatalogProvider, CatalogModel } from "./models/catalog.js"
 
-// Review (Kilocode 1:1 — build review prompts from git diff)
-export { buildReviewPromptBranch, buildReviewPromptUncommitted } from "./review/index.js"
-export type { DiffFile, DiffHunk, DiffResult } from "./review/types.js"
+// Command-scoped code review.
+export {
+  buildReviewInstruction,
+  buildReviewPromptBranch,
+  buildReviewPromptUncommitted,
+  parseReviewRequest,
+  resolveReviewRequest,
+} from "./review/index.js"
+export type {
+  DiffFile,
+  DiffHunk,
+  DiffResult,
+  ReviewRequest,
+  ReviewTarget,
+} from "./review/types.js"
 
 // Workspace runtime
 export {

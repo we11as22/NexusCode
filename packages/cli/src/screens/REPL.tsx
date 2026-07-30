@@ -444,7 +444,7 @@ export function REPL({
 
   /** Nexus mode captured when the next turn starts. It cannot change during an active turn. */
   const [nexusModeOverride, setNexusModeOverride] = useState<string>(
-    () => nexusInitialMode ?? 'agent',
+    () => nexusInitialMode === 'review' ? 'agent' : (nexusInitialMode ?? 'agent'),
   )
 
   /** Granular auto-approve controls for Nexus tools (read/write/execute/mcp/browser). */
@@ -1703,8 +1703,7 @@ export function REPL({
     const mode =
       nexusModeOverride === 'plan' ||
       nexusModeOverride === 'ask' ||
-      nexusModeOverride === 'debug' ||
-      nexusModeOverride === 'review'
+      nexusModeOverride === 'debug'
         ? nexusModeOverride
         : 'agent'
     nexusBootstrap.session.setMode(mode)
@@ -2189,8 +2188,12 @@ export function REPL({
                     )
                   }}
                   onAbandon={async () => {
+                    const storedReturnMode =
+                      nexusBootstrap.session.getPlanReturnMode()
                     const returnMode =
-                      nexusBootstrap.session.getPlanReturnMode() ?? 'agent'
+                      storedReturnMode === 'review'
+                        ? 'agent'
+                        : (storedReturnMode ?? 'agent')
                     nexusBootstrap.session.setMode(returnMode)
                     nexusBootstrap.mode = returnMode
                     setNexusPlanFollowup(null)

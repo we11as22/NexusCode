@@ -30,4 +30,23 @@ describe("MessageList user display projection", () => {
     )
     expect(html).not.toContain("private injected plan")
   })
+
+  it("labels command-scoped reviewer turns without exposing review as a persistent mode", () => {
+    const html = renderToStaticMarkup(
+      <MessageList
+        messages={[
+          {
+            id: "user-review",
+            ts: 1,
+            role: "user",
+            mode: "review",
+            content: "Review these 2 changed files",
+          },
+        ]}
+      />,
+    )
+
+    expect(html).toContain("Reviewer")
+    expect(html).toContain("Review these 2 changed files")
+  })
 })

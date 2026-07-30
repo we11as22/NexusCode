@@ -15,7 +15,7 @@ const MAX_TOTAL_STRING_CHARS = 24 * 1024 * 1024
 const MAX_NODES = 20_000
 const MAX_DEPTH = 16
 const MAX_OBJECT_KEYS = 256
-const MODES = ["agent", "plan", "ask", "debug", "review"] as const
+const USER_MODES = ["agent", "plan", "ask", "debug"] as const
 const CONFIG_PATCH_SCHEMA = NexusConfigSchema.deepPartial()
 
 type PlainRecord = Record<string, unknown>
@@ -439,7 +439,7 @@ function validateRequest(message: PlainRecord): WebviewMessage {
           type: enumRule([type]),
           clientMessageId: identifierRule,
           content: stringRule(1_000_000),
-          mode: enumRule(MODES),
+          mode: enumRule(USER_MODES),
         },
         {
           mentions: stringRule(128_000),
@@ -449,7 +449,7 @@ function validateRequest(message: PlainRecord): WebviewMessage {
       )
       break
     case "setMode":
-      one("mode", enumRule(MODES))
+      one("mode", enumRule(USER_MODES))
       break
     case "setProfile":
       one("profile", stringRule(256))

@@ -1,9 +1,13 @@
 import React, { useState, useRef, useEffect } from "react"
 import { createPortal } from "react-dom"
-import { useChatStore, type Mode } from "../stores/chat.js"
+import { useChatStore } from "../stores/chat.js"
+import {
+  USER_SELECTABLE_MODES,
+  type UserSelectableMode,
+} from "./user-mode-policy.js"
 
 const MODES: Array<{
-  id: Mode
+  id: UserSelectableMode
   label: string
   icon: React.ReactNode
   description: string
@@ -53,18 +57,14 @@ const MODES: Array<{
     ),
     description: "Same tools as agent; diagnose first, then minimal fixes",
   },
-  {
-    id: "review",
-    label: "Review",
-    icon: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-        <path d="M14 2v6h6M16 13H8M16 17H8M10 9H8" />
-      </svg>
-    ),
-    description: "Audit changes (git + read); no edits or new tasks",
-  },
 ]
+
+if (
+  MODES.length !== USER_SELECTABLE_MODES.length ||
+  MODES.some((mode, index) => mode.id !== USER_SELECTABLE_MODES[index])
+) {
+  throw new Error("Mode menu does not match the user-selectable mode policy")
+}
 
 export function ModeDropdown() {
   const { mode, isRunning, setMode } = useChatStore()

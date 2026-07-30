@@ -25,7 +25,7 @@ export const MODE_TOOL_GROUPS: Record<Mode, ToolGroup[]> = {
   plan: ["always", "read", "write", "search", "mcp", "skills", "agents", "context", "plan_exit"],
   ask: ["always", "read", "search", "mcp", "skills", "agents", "context"],
   debug: ["always", "plan_enter", "read", "write", "execute", "search", "mcp", "skills", "agents", "context"],
-  review: ["always", "read", "git_inspect", "search", "mcp", "skills", "agents", "context"],
+  review: ["always", "read", "git_inspect", "search", "context"],
 }
 
 /**
@@ -104,6 +104,13 @@ export const MODE_BLOCKED_TOOLS: Record<Mode, string[]> = {
   ],
   debug: ["PlanExit", "ExitPlanMode"],
   review: [
+    "AskFollowupQuestion",
+    "TodoWrite",
+    "Parallel",
+    "SendUserMessage",
+    "ToolSearch",
+    "WebFetch",
+    "WebSearch",
     "Write",
     "Edit",
     "ApplyPatch",
@@ -327,7 +334,7 @@ export function getModeToolPolicySummary(mode: Mode): string {
     case "debug":
       return "Same built-in surface as agent (incl. EnterPlanMode); use for diagnose-then-fix. PlanExit is disabled."
     case "review":
-      return "Read/search and validated read-only Git inspection, MCP resources, skills, Condense; inspect tasks/teams/remotes/plugins/plans (list/get/output/snapshot). No MCP authentication, arbitrary shell, file edits, task create/resume/stop/update, memory writes, team mutations, plugin install, remote control, plan workflow mutations, RunPluginHook."
+      return "Local read/search plus validated read-only Git inspection and Condense. No web, MCP/custom tools, skills, arbitrary shell, edits, questions, todos, memory, or orchestration."
     default:
       return String(mode)
   }
@@ -376,6 +383,7 @@ export function isDynamicToolAllowedInMode(
 ): boolean {
   if (tool.modes && !tool.modes.includes(mode)) return false
   if (mode === "agent" || mode === "debug") return true
+  if (mode === "review") return false
   return tool.readOnly === true
 }
 
@@ -424,5 +432,5 @@ export const MODE_DESCRIPTIONS: Record<Mode, string> = {
   debug:
     "DEBUG mode: same tool palette as agent; diagnose first with evidence, then minimal fixes and re-verify. PlanExit is disabled.",
   review:
-    "REVIEW mode: audit only — read/search and validated GitInspect, MCP resources, skills; inspect existing tasks/teams/remotes/plugins/plans without creating or mutating orchestration. No MCP authentication, arbitrary shell, Write/Edit, new tasks, or PlanExit/EnterPlanMode.",
+    "REVIEW execution: command-scoped audit only — local read/search and validated GitInspect. No web, MCP/custom tools, skills, arbitrary shell, edits, questions, todos, memory, orchestration, or Plan workflow mutation; the chat's persistent mode is unchanged.",
 }

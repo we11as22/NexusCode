@@ -60,6 +60,14 @@ describe("plan follow-up recovery", () => {
     expect(getSessionModeForResume(session, "plan")).toBe("agent")
   })
 
+  it("migrates legacy persisted review mode back to agent", () => {
+    const session = Session.createEphemeral(process.cwd())
+    session.setMode("review")
+    session.addMessage({ role: "user", content: "/review", mode: "review" })
+
+    expect(getSessionModeForResume(session, "debug")).toBe("agent")
+  })
+
   it("reads the exact most recently completed plan write instead of the first plan alphabetically", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "nexus-plan-followup-"))
     await mkdir(join(cwd, ".nexus", "plans"), { recursive: true })

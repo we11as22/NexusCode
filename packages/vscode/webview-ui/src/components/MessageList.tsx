@@ -673,6 +673,12 @@ function RenderItemRow({
     return (
       <div className="nexus-user-msg-wrap nexus-chat-slot-root">
         <div className={`nexus-user-msg-bubble${canRollback ? " nexus-user-msg-bubble-has-rollback" : ""}`}>
+          {message.mode === "review" ? (
+            <div className="nexus-reviewer-turn-label">
+              <span className="codicon codicon-search" aria-hidden="true" />
+              Reviewer
+            </div>
+          ) : null}
           <div className="nexus-user-msg-content">{renderUserTextWithPasteChips(userText)}</div>
           {canRollback && (
             <MessageCheckpointMenu

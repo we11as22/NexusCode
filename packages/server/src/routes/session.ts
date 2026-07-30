@@ -110,12 +110,17 @@ sessionRoutes.patch("/:id/mode", async (c) => {
     todo?: unknown
   }
   const mode = body.mode
+  if (mode === "review") {
+    return c.json({
+      error:
+        "Review is command-scoped; use /review from an Agent, Plan, Ask, or Debug session",
+    }, 400)
+  }
   if (
     mode !== "agent" &&
     mode !== "plan" &&
     mode !== "ask" &&
-    mode !== "debug" &&
-    mode !== "review"
+    mode !== "debug"
   ) {
     return c.json({ error: "Invalid mode" }, 400)
   }

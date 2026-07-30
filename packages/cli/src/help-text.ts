@@ -18,7 +18,7 @@ Options:
   --server <url>        NexusCode server URL (NEXUS_SERVER_URL env)
   --continue            Continue most recent session
   --profile <name>      Named profile from nexus.yaml
-  --mode <mode>         Override: agent | ask | plan | debug | review; resume keeps saved mode
+  --mode <mode>         Override: agent | ask | plan | debug; /review launches the reviewer
   -h, --help            Show this help
   -v, --version         Show version
 

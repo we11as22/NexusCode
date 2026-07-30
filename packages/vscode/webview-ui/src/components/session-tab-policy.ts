@@ -5,39 +5,106 @@ export type SessionTabPreview = {
   messageCount: number
 }
 
-export const SESSION_DROPDOWN_LIMIT = 8
+function uniqueSessionIds(ids: readonly string[]): string[] {
+  return ids.filter(
+    (id, index) => id.length > 0 && ids.indexOf(id) === index,
+  )
+}
 
-/**
- * The compact strip represents the currently open chat, not all history.
- * Full history remains available from the adjacent dropdown and Sessions view.
- */
-export function visibleSessionTabs(
-  sessions: readonly SessionTabPreview[],
+export type PersistedSessionTabs = {
+  openIds: string[]
+  activeId: string
+}
+
+export function readPersistedSessionTabs(state: unknown): PersistedSessionTabs {
+  if (state == null || typeof state !== "object") {
+    return { openIds: [], activeId: "" }
+  }
+  const candidate = (state as { nexusSessionTabs?: unknown }).nexusSessionTabs
+  if (candidate == null || typeof candidate !== "object") {
+    return { openIds: [], activeId: "" }
+  }
+  const raw = candidate as { openIds?: unknown; activeId?: unknown }
+  const openIds = Array.isArray(raw.openIds)
+    ? uniqueSessionIds(raw.openIds.filter((id): id is string => typeof id === "string"))
+    : []
+  return {
+    openIds,
+    activeId: typeof raw.activeId === "string" ? raw.activeId : "",
+  }
+}
+
+export function persistedSessionTabsState(
+  previousState: unknown,
+  openIds: readonly string[],
+  activeId: string,
+): Record<string, unknown> {
+  const base =
+    previousState != null && typeof previousState === "object"
+      ? previousState as Record<string, unknown>
+      : {}
+  return {
+    ...base,
+    nexusSessionTabs: {
+      openIds: uniqueSessionIds(openIds),
+      activeId,
+    },
+  }
+}
+
+export function openSessionTab(
+  openIds: readonly string[],
   sessionId: string,
-): SessionTabPreview[] {
-  const current = sessions.find((session) => session.id === sessionId)
-  if (current) return [current]
-  return [{
-    id: sessionId,
-    ts: 0,
-    title: "New chat",
-    messageCount: 0,
-  }]
+): string[] {
+  if (!sessionId || openIds.includes(sessionId)) return [...openIds]
+  return [...openIds, sessionId]
+}
+
+export function reconcileSessionTabs(
+  openIds: readonly string[],
+  sessions: readonly SessionTabPreview[],
+  activeSessionId: string,
+): string[] {
+  const available = new Set(sessions.map((session) => session.id))
+  const restored = uniqueSessionIds(openIds).filter((id) => available.has(id))
+  return openSessionTab(restored, activeSessionId)
+}
+
+export function closeSessionTab(
+  openIds: readonly string[],
+  closingId: string,
+  activeSessionId: string,
+): { openIds: string[]; nextActiveId: string | null } {
+  const uniqueIds = uniqueSessionIds(openIds)
+  const closingIndex = uniqueIds.indexOf(closingId)
+  const remaining = uniqueIds.filter((id) => id !== closingId)
+  if (closingId !== activeSessionId) {
+    return { openIds: remaining, nextActiveId: activeSessionId || null }
+  }
+  if (remaining.length === 0) {
+    return { openIds: [], nextActiveId: null }
+  }
+  const neighbourIndex = Math.min(Math.max(closingIndex - 1, 0), remaining.length - 1)
+  return { openIds: remaining, nextActiveId: remaining[neighbourIndex] ?? null }
 }
 
 /**
- * The quick switcher is intentionally small. The full searchable history is
- * the progressive session view; mounting every saved session here made a
- * visually clipped dropdown retain an unbounded hidden DOM.
+ * Only lightweight metadata for open chats is mounted. Message bodies remain
+ * loaded solely for the active session, so a long history does not grow the DOM.
  */
-export function visibleSessionDropdown(
+export function visibleSessionTabs(
   sessions: readonly SessionTabPreview[],
-  sessionId: string,
+  openIds: readonly string[],
+  activeSessionId: string,
 ): SessionTabPreview[] {
-  const recent = sessions.slice(0, SESSION_DROPDOWN_LIMIT)
-  const active = sessions.find((session) => session.id === sessionId)
-  if (!active || recent.some((session) => session.id === active.id)) {
-    return recent
-  }
-  return [active, ...recent.slice(0, SESSION_DROPDOWN_LIMIT - 1)]
+  const byId = new Map(sessions.map((session) => [session.id, session]))
+  return reconcileSessionTabs(openIds, sessions, activeSessionId).map(
+    (id) =>
+      byId.get(id) ?? {
+        id,
+        ts: 0,
+        title: "New chat",
+        messageCount: 0,
+      },
+  )
 }

@@ -195,20 +195,28 @@ async function readMostRecentlyModifiedPlan(cwd: string): Promise<string | null>
 /**
  * Recover the per-session execution mode after replay/switching sessions.
  * New transcripts persist it on user turns; completed legacy PlanExit sessions
- * recover as plan so the approval surface remains reachable.
+ * recover as plan so the approval surface remains reachable. Review is an
+ * internal command-scoped turn, so old sessions that persisted it migrate to
+ * agent instead of exposing a stale user mode.
  */
 export function getSessionModeForResume(
   session: ISession,
   fallback: Mode = "agent",
 ): Mode {
   const persisted = session.getMode()
+  if (persisted === "review") return "agent"
   if (persisted && MODES.has(persisted)) return persisted
   const latestUser = [...session.messages]
     .reverse()
-    .find((message) => message.role === "user" && MODES.has(message.mode as Mode))
+    .find(
+      (message) =>
+        message.role === "user" &&
+        message.mode !== "review" &&
+        MODES.has(message.mode as Mode),
+    )
   if (latestUser?.mode && MODES.has(latestUser.mode)) return latestUser.mode
   if (hadPlanExit(session)) return "plan"
-  return fallback
+  return fallback === "review" ? "agent" : fallback
 }
 
 /**

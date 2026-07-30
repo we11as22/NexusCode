@@ -1,13 +1,16 @@
 import { describe, expect, it } from "vitest"
 
 import {
-  SESSION_DROPDOWN_LIMIT,
-  visibleSessionDropdown,
+  closeSessionTab,
+  openSessionTab,
+  persistedSessionTabsState,
+  readPersistedSessionTabs,
+  reconcileSessionTabs,
   visibleSessionTabs,
 } from "./session-tab-policy.js"
 
 describe("visibleSessionTabs", () => {
-  it("keeps only the active session in the compact tab strip", () => {
+  it("renders only persisted open tabs and preserves their order", () => {
     const sessions = Array.from({ length: 30 }, (_, index) => ({
       id: `session-${index}`,
       ts: index,
@@ -15,13 +18,21 @@ describe("visibleSessionTabs", () => {
       messageCount: index,
     }))
 
-    expect(visibleSessionTabs(sessions, "session-17")).toEqual([
+    expect(
+      visibleSessionTabs(
+        sessions,
+        ["session-3", "session-17", "session-9"],
+        "session-17",
+      ),
+    ).toEqual([
+      sessions[3],
       sessions[17],
+      sessions[9],
     ])
   })
 
   it("uses a synthetic current tab before a new session enters history", () => {
-    expect(visibleSessionTabs([], "new-session")).toEqual([
+    expect(visibleSessionTabs([], [], "new-session")).toEqual([
       {
         id: "new-session",
         ts: 0,
@@ -31,20 +42,87 @@ describe("visibleSessionTabs", () => {
     ])
   })
 
-  it("bounds the quick dropdown while keeping an older active session reachable", () => {
-    const sessions = Array.from({ length: 54 }, (_, index) => ({
-      id: `session-${index}`,
-      ts: 54 - index,
-      title: `Session ${index}`,
-      messageCount: index,
-    }))
+  it("opens a history item once without discarding existing tabs", () => {
+    expect(openSessionTab(["session-a", "session-b"], "session-c")).toEqual([
+      "session-a",
+      "session-b",
+      "session-c",
+    ])
+    expect(openSessionTab(["session-a", "session-b"], "session-a")).toEqual([
+      "session-a",
+      "session-b",
+    ])
+  })
 
-    const visible = visibleSessionDropdown(sessions, "session-40")
+  it("closes an active tab without deleting history and focuses its left neighbour", () => {
+    expect(
+      closeSessionTab(
+        ["session-a", "session-b", "session-c"],
+        "session-b",
+        "session-b",
+      ),
+    ).toEqual({
+      openIds: ["session-a", "session-c"],
+      nextActiveId: "session-a",
+    })
+  })
 
-    expect(visible).toHaveLength(SESSION_DROPDOWN_LIMIT)
-    expect(visible[0]).toBe(sessions[40])
-    expect(visible.slice(1)).toEqual(
-      sessions.slice(0, SESSION_DROPDOWN_LIMIT - 1),
+  it("closes a background tab without changing the active chat", () => {
+    expect(
+      closeSessionTab(
+        ["session-a", "session-b", "session-c"],
+        "session-a",
+        "session-c",
+      ),
+    ).toEqual({
+      openIds: ["session-b", "session-c"],
+      nextActiveId: "session-c",
+    })
+  })
+
+  it("reconciles restored tabs with durable history while keeping a new active chat", () => {
+    const sessions = [
+      { id: "session-a", ts: 3, messageCount: 1 },
+      { id: "session-c", ts: 1, messageCount: 2 },
+    ]
+
+    expect(
+      reconcileSessionTabs(
+        ["session-a", "missing", "session-c"],
+        sessions,
+        "new-session",
+      ),
+    ).toEqual(["session-a", "session-c", "new-session"])
+  })
+
+  it("round-trips open tabs through VS Code webview state without overwriting other state", () => {
+    const persisted = persistedSessionTabsState(
+      { unrelated: { keep: true } },
+      ["session-a", "session-b", "session-a", ""],
+      "session-b",
     )
+
+    expect(persisted).toEqual({
+      unrelated: { keep: true },
+      nexusSessionTabs: {
+        openIds: ["session-a", "session-b"],
+        activeId: "session-b",
+      },
+    })
+    expect(readPersistedSessionTabs(persisted)).toEqual({
+      openIds: ["session-a", "session-b"],
+      activeId: "session-b",
+    })
+  })
+
+  it("fails closed on malformed restored webview state", () => {
+    expect(
+      readPersistedSessionTabs({
+        nexusSessionTabs: { openIds: ["valid", 7, null], activeId: 9 },
+      }),
+    ).toEqual({
+      openIds: ["valid"],
+      activeId: "",
+    })
   })
 })

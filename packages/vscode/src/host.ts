@@ -48,7 +48,6 @@ import type {
   HostSandboxProcess,
   HostSandboxStartOptions,
 } from "@nexuscode/core"
-import { sanitizeTerminalOutput } from "./terminal-output.js"
 import { parseStrictExternalHttpUrl } from "./external-url-policy.js"
 import { resolveRipgrepPath } from "./services/indexing/list-absolute-paths-rg.js"
 
@@ -207,7 +206,6 @@ export class VsCodeHost implements IHost {
     getDiff(from: string, to?: string): Promise<ChangedFile[]>
   }
   private useWebviewApproval: boolean
-  private runCommandsInTerminal: boolean
   private approvalResolveRef: WebviewApprovalResolverSlot | null = null
   private emittedApprovalPartId: string | null = null
   private onCheckpointEntriesUpdated?: () => void
@@ -218,7 +216,6 @@ export class VsCodeHost implements IHost {
     onEvent: (event: AgentEvent) => void,
     options?: {
       useWebviewApproval?: boolean
-      runCommandsInTerminal?: boolean
       approvalResolveRef?: WebviewApprovalResolverSlot
       onCheckpointEntriesUpdated?: () => void
       onModeChangeRequested?: (mode: Mode, reason?: string) => Promise<void> | void
@@ -229,7 +226,6 @@ export class VsCodeHost implements IHost {
     this.cwd = cwd
     this.eventEmitter = onEvent
     this.useWebviewApproval = options?.useWebviewApproval ?? false
-    this.runCommandsInTerminal = options?.runCommandsInTerminal ?? false
     this.approvalResolveRef = options?.approvalResolveRef ?? null
     this.onCheckpointEntriesUpdated = options?.onCheckpointEntriesUpdated
     this.onModeChangeRequested = options?.onModeChangeRequested
@@ -650,14 +646,6 @@ export class VsCodeHost implements IHost {
     signal?: AbortSignal
   ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
     const commandCwd = this.resolveWorkspacePath(cwd || this.cwd)
-    if (this.runCommandsInTerminal) {
-      const terminal = this.getOrCreateNexusTerminal(commandCwd)
-      const integration = await this.waitForShellIntegration(terminal)
-      if (integration) {
-        terminal.show(true)
-        return this.runIntegratedTerminalCommand(terminal, integration, command, signal)
-      }
-    }
     const { execa } = await import("execa")
     const result = await execa(command, {
       shell: true,
@@ -770,105 +758,6 @@ export class VsCodeHost implements IHost {
     return {
       success: false,
       message: request.message?.trim() || `No authentication URL available for ${request.server}.`,
-    }
-  }
-
-  private getOrCreateNexusTerminal(cwd: string): vscode.Terminal {
-    const name = "NexusCode"
-    const normalizedCwd = path.resolve(cwd || this.cwd)
-    const existing = vscode.window.terminals.find((terminal) => {
-      if (terminal.name !== name) return false
-      const configuredCwd =
-        "cwd" in terminal.creationOptions ? terminal.creationOptions.cwd : undefined
-      const fsPath =
-        typeof configuredCwd === "string"
-          ? configuredCwd
-          : configuredCwd instanceof vscode.Uri
-            ? configuredCwd.fsPath
-            : terminal.shellIntegration?.cwd?.fsPath
-      return fsPath ? path.resolve(fsPath) === normalizedCwd : false
-    })
-    if (existing) return existing
-    return vscode.window.createTerminal({
-      name,
-      cwd: normalizedCwd,
-    })
-  }
-
-  private async waitForShellIntegration(
-    terminal: vscode.Terminal,
-    timeoutMs = 1500,
-  ): Promise<vscode.TerminalShellIntegration | undefined> {
-    if (terminal.shellIntegration) return terminal.shellIntegration
-    terminal.show(true)
-    return new Promise((resolve) => {
-      let settled = false
-      const finish = (integration?: vscode.TerminalShellIntegration) => {
-        if (settled) return
-        settled = true
-        clearTimeout(timeout)
-        subscription.dispose()
-        resolve(integration)
-      }
-      const subscription = vscode.window.onDidChangeTerminalShellIntegration((event) => {
-        if (event.terminal === terminal) finish(event.shellIntegration)
-      })
-      const timeout = setTimeout(() => finish(terminal.shellIntegration), timeoutMs)
-    })
-  }
-
-  private async runIntegratedTerminalCommand(
-    terminal: vscode.Terminal,
-    integration: vscode.TerminalShellIntegration,
-    command: string,
-    signal?: AbortSignal,
-  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-    if (signal?.aborted) return { stdout: "", stderr: "", exitCode: 130 }
-    let execution: vscode.TerminalShellExecution | undefined
-    let output = ""
-    let outputTruncated = false
-    let readError = ""
-    let finish!: (exitCode: number) => void
-    const ended = new Promise<number>((resolve) => {
-      finish = resolve
-    })
-    const endSubscription = vscode.window.onDidEndTerminalShellExecution((event) => {
-      if (execution && event.execution === execution) finish(event.exitCode ?? 1)
-    })
-    execution = integration.executeCommand(command)
-    const reader = (async () => {
-      for await (const chunk of execution!.read()) {
-        output += chunk
-        if (output.length > 2_000_000) {
-          output = output.slice(-2_000_000)
-          outputTruncated = true
-        }
-      }
-    })().catch((error: unknown) => {
-      readError = `Failed to capture terminal output: ${error instanceof Error ? error.message : String(error)}`
-    })
-    const interrupt = () => terminal.sendText("\x03", false)
-    let resolveAbort!: () => void
-    const aborted = new Promise<number>((resolve) => {
-      resolveAbort = () => resolve(130)
-      if (signal?.aborted) resolveAbort()
-      else signal?.addEventListener("abort", resolveAbort, { once: true })
-    })
-    signal?.addEventListener("abort", interrupt, { once: true })
-    try {
-      const exitCode = await Promise.race([ended, aborted])
-      await Promise.race([reader, new Promise<void>((resolve) => setTimeout(resolve, 500))])
-      return {
-        stdout: sanitizeTerminalOutput(
-          `${outputTruncated ? "[output truncated to last 2000000 characters]\n" : ""}${output}`,
-        ),
-        stderr: readError,
-        exitCode,
-      }
-    } finally {
-      signal?.removeEventListener("abort", interrupt)
-      signal?.removeEventListener("abort", resolveAbort)
-      endSubscription.dispose()
     }
   }
 

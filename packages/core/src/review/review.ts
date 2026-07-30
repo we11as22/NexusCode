@@ -1,126 +1,253 @@
-/**
- * Review module — builds code review prompts from git diff (Kilocode 1:1).
- * Runs git in the given cwd and returns a full prompt for the agent.
- */
+/** Builds a command-scoped, read-only reviewer turn from a validated Git target. */
 
 import { execa } from "execa"
-import type { DiffFile, DiffHunk, DiffResult } from "./types.js"
+import type {
+  DiffFile,
+  DiffHunk,
+  DiffResult,
+  ReviewRequest,
+  ReviewTarget,
+} from "./types.js"
 
-const REVIEW_PROMPT = `You are Kilo Code, an expert code reviewer with deep expertise in software engineering best practices, security vulnerabilities, performance optimization, and code quality. Your role is advisory — provide clear, actionable feedback but DO NOT modify any files. Do not use any file editing tools.
+const REVIEW_RUBRIC = `You are a dedicated code reviewer. Review the requested Git change and report findings only. Do not modify files, create tasks, or implement fixes.
 
-You are reviewing: \${SCOPE_DESCRIPTION}
+## Review standard
 
-## Files Changed
+- Report only actionable defects introduced by the reviewed change: correctness bugs, regressions, security issues, data loss, meaningful performance problems, and important missing tests.
+- Do not report style preferences, naming tastes, speculative risks, or pre-existing problems outside the changed lines.
+- Read enough surrounding code and tests to establish that each finding is real.
+- Every finding must identify the smallest useful line range in the changed code. Keep ranges short; avoid ranges larger than 10 lines unless the defect truly spans them.
+- Order findings by priority:
+  - **P0** — release-blocking or catastrophic for nearly all users.
+  - **P1** — high-impact defect that should be fixed immediately.
+  - **P2** — normal correctness issue that should be fixed.
+  - **P3** — low-impact but concrete defect.
+- If there are no qualifying findings, say so plainly. Do not invent suggestions to fill the report.
 
-\${FILE_LIST}
+## Output
 
-## How to Review
+Start with findings, ordered by priority:
 
-1. **Gather context**: Read full file context when needed; diffs alone can be misleading, as code that looks wrong in isolation may be correct given surrounding logic.
+### Findings
 
-2. **Tools Usage**: \${TOOLS}
+For each finding:
 
-3. **Be confident**: Only flag issues where you have high confidence. Use these thresholds:
-   - **CRITICAL (95%+)**: Security vulnerabilities, data loss risks, crashes, authentication bypasses
-   - **WARNING (85%+)**: Bugs, logic errors, performance issues, unhandled errors
-   - **SUGGESTION (75%+)**: Code quality improvements, best practices, maintainability
-   - **Below 75%**: Don't report — gather more context first or omit the finding
+\`[P1] Imperative title\` — \`path/to/file.ts:lineStart-lineEnd\`
 
-4. **Focus on what matters**:
-   - Security: Injection, auth issues, data exposure
-   - Bugs: Logic errors, null handling, race conditions
-   - Performance: Inefficient algorithms, memory leaks
-   - Error handling: Missing try-catch, unhandled promises
+Then one compact paragraph explaining the failure scenario, why it is caused by this change, and the concrete impact. Do not include a full patch.
 
-5. **Don't flag**:
-   - Style preferences that don't affect functionality
-   - Minor naming suggestions
-   - Patterns that match existing codebase conventions
-   - Pre-existing code that wasn't modified in this diff
+After all findings, include:
 
-Your review MUST follow this exact format:
+### Overall
 
-## Local Review for \${SCOPE_DESCRIPTION}
+- **Verdict:** \`APPROVE\` or \`NEEDS CHANGES\`
+- **Summary:** one or two sentences describing the change and the review result.
+- **Residual risks / test gaps:** only material gaps that remain after the review, or "None identified."
 
-### Summary
-2-3 sentences describing what this change does and your overall assessment.
+Do not ask whether to apply fixes. The review turn ends after the report.`
 
-### Issues Found
-| Severity | File:Line | Issue |
-|----------|-----------|-------|
-| CRITICAL | path/file.ts:42 | Brief description |
-| WARNING | path/file.ts:78 | Brief description |
-| SUGGESTION | path/file.ts:15 | Brief description |
-
-If no issues found: "No issues found."
-
-### Detailed Findings
-For each issue listed in the table above:
-- **File:** \`path/to/file.ts:line\`
-- **Confidence:** X%
-- **Problem:** What's wrong and why it matters
-- **Suggestion:** Recommended fix with code snippet if applicable
-
-If no issues found: "No detailed findings."
-
-### Recommendation
-One of:
-- **APPROVE** — Code is ready to merge/commit
-- **APPROVE WITH SUGGESTIONS** — Minor improvements suggested but not blocking
-- **NEEDS CHANGES** — Issues must be addressed before merging
-
-## IMPORTANT: Post-Review Workflow
-
-You MUST first write the COMPLETE review above (Summary, Issues Found, Detailed Findings, Recommendation) as regular text output. Do NOT use the question tool until the entire review text has been written.
-
-ONLY AFTER the full review is written:
-
-- If your recommendation is **APPROVE** with no issues found, you are done. Do NOT call the question tool.
-- If your recommendation is **APPROVE WITH SUGGESTIONS** or **NEEDS CHANGES**, THEN call the question tool to offer fix suggestions with mode switching.
-
-When calling the question tool, provide at least one option. Choose the appropriate mode for each option:
-- mode "agent" for direct code fixes (bugs, missing error handling, clear improvements)
-- mode "debug" for issues needing investigation before fixing (race conditions, unclear root causes, intermittent failures)
-- mode "agent" when there are many issues (5+) spanning different categories; the agent can decompose and parallelize fixes via sub-agents
-
-Option patterns based on review findings:
-- **Few clear fixes (1-4 issues, same category):** offer mode "agent" fixes
-- **Many issues across categories (5+, mixed security/performance/quality):** offer mode "agent" to plan and execute coordinated fixes (or "plan" then "agent"), and mode "agent" for quick wins
-- **Issues needing investigation:** include a mode "debug" option to investigate root causes
-- **Suggestions only:** offer mode "agent" to apply improvements
-
-Example question tool call (ONLY after full review is written):
-{
-  "questions": [{
-    "question": "What would you like to do?",
-    "header": "Next steps",
-    "options": [
-      { "label": "Fix all issues", "description": "Fix all issues found in this review", "mode": "agent" },
-      { "label": "Fix critical only", "description": "Fix critical issues only", "mode": "agent" }
-    ]
-  }]
+function cleanToken(value: string): string {
+  return value.trim().replace(/[\u0000-\u001f\u007f]/gu, "")
 }
-`
 
-const EMPTY_DIFF_PROMPT = `You are Kilo Code, an expert code reviewer with deep expertise in software engineering best practices, security vulnerabilities, performance optimization, and code quality. Your role is advisory — provide clear, actionable feedback but DO NOT modify any files. Do not use any file editing tools.
+const REVIEW_REVISION_PATTERN =
+  /^[A-Za-z0-9][A-Za-z0-9._/@~^{}:+-]*$/u
 
-You are reviewing: \${SCOPE_DESCRIPTION}.
+function validatedReviewRevision(value: string): string {
+  const revision = cleanToken(value)
+  if (
+    revision.length === 0 ||
+    revision.length > 256 ||
+    revision.startsWith("-") ||
+    !REVIEW_REVISION_PATTERN.test(revision)
+  ) {
+    throw new TypeError("Git revision contains unsupported characters")
+  }
+  return revision
+}
 
-There is nothing to review.
+export function parseReviewRequest(input: string): ReviewRequest {
+  const trimmed = input.trim()
+  if (!trimmed || /^uncommitted$/iu.test(trimmed)) {
+    return { target: { kind: "uncommitted" } }
+  }
+  const uncommitted = trimmed.match(/^uncommitted\s+([\s\S]+)$/iu)
+  if (uncommitted) {
+    const guidance = cleanToken(uncommitted[1] ?? "")
+    return {
+      target: { kind: "uncommitted" },
+      ...(guidance ? { guidance } : {}),
+    }
+  }
 
-Your MUST output to the user this exact format:
+  const branch = trimmed.match(/^branch(?:\s+(\S+))?(?:\s+([\s\S]+))?$/iu)
+  if (branch) {
+    const rawBase = cleanToken(branch[1] ?? "")
+    const base = rawBase ? validatedReviewRevision(rawBase) : ""
+    const guidance = cleanToken(branch[2] ?? "")
+    return {
+      target: { kind: "branch", ...(base ? { base } : {}) },
+      ...(guidance ? { guidance } : {}),
+    }
+  }
 
-## Local Review for \${SCOPE_DESCRIPTION}
+  const commit = trimmed.match(/^commit\s+(\S+)(?:\s+([\s\S]+))?$/iu)
+  if (commit) {
+    const ref = validatedReviewRevision(commit[1] ?? "")
+    const guidance = cleanToken(commit[2] ?? "")
+    if (ref) {
+      return {
+        target: { kind: "commit", ref },
+        ...(guidance ? { guidance } : {}),
+      }
+    }
+  }
 
-### Summary
-No changes detected.
+  return {
+    target: { kind: "uncommitted" },
+    guidance: cleanToken(trimmed),
+  }
+}
 
-### Issues Found
-No issues found.
+async function revisionExists(cwd: string, value: string): Promise<boolean> {
+  const revision = validatedReviewRevision(value)
+  const result = await execa(
+    "git",
+    ["rev-parse", "--verify", "--quiet", `${revision}^{commit}`],
+    { cwd, reject: false },
+  )
+  return result.exitCode === 0
+}
 
-### Recommendation
-**APPROVE** — Nothing to review.
-`
+/**
+ * Resolve ambiguous command text against the repository without ever invoking
+ * a shell. Kilo's strongest `/review` behavior treats the first token after
+ * `branch` as a base only when it is an actual Git ref; otherwise it remains
+ * user guidance. A bare resolvable revision selects a commit review.
+ */
+export async function resolveReviewRequest(
+  cwd: string,
+  input: string,
+): Promise<ReviewRequest> {
+  const trimmed = input.trim()
+  const branch = trimmed.match(/^branch(?:\s+([\s\S]+))?$/iu)
+  if (branch) {
+    const remainder = branch[1]?.trim() ?? ""
+    if (!remainder) return { target: { kind: "branch" } }
+
+    const explicit = remainder.match(
+      /^(?:base\s*=\s*|base\s+|against\s+|compare\s+to\s+|vs\s+)(\S+)(?:\s+([\s\S]+))?$/iu,
+    )
+    if (explicit) {
+      const base = validatedReviewRevision(explicit[1] ?? "")
+      if (!(await revisionExists(cwd, base))) {
+        throw new TypeError(`Git revision was not found: ${base}`)
+      }
+      const guidance = cleanToken(explicit[2] ?? "")
+      return {
+        target: { kind: "branch", base },
+        ...(guidance ? { guidance } : {}),
+      }
+    }
+
+    const [candidate = "", ...rest] = remainder.split(/\s+/u)
+    if (
+      candidate &&
+      REVIEW_REVISION_PATTERN.test(candidate) &&
+      !candidate.startsWith("-") &&
+      await revisionExists(cwd, candidate)
+    ) {
+      const guidance = cleanToken(rest.join(" "))
+      return {
+        target: {
+          kind: "branch",
+          base: validatedReviewRevision(candidate),
+        },
+        ...(guidance ? { guidance } : {}),
+      }
+    }
+    return {
+      target: { kind: "branch" },
+      guidance: cleanToken(remainder),
+    }
+  }
+
+  const parsed = parseReviewRequest(trimmed)
+  if (
+    parsed.target.kind === "commit" &&
+    !(await revisionExists(cwd, parsed.target.ref))
+  ) {
+    throw new TypeError(`Git revision was not found: ${parsed.target.ref}`)
+  }
+  if (
+    parsed.target.kind === "uncommitted" &&
+    parsed.guidance &&
+    !/\s/u.test(parsed.guidance) &&
+    REVIEW_REVISION_PATTERN.test(parsed.guidance) &&
+    !parsed.guidance.startsWith("-") &&
+    await revisionExists(cwd, parsed.guidance)
+  ) {
+    return {
+      target: {
+        kind: "commit",
+        ref: validatedReviewRevision(parsed.guidance),
+      },
+    }
+  }
+  return parsed
+}
+
+function targetInstructions(target: ReviewTarget): {
+  scope: string
+  inspections: string[]
+} {
+  if (target.kind === "commit") {
+    return {
+      scope: `commit \`${target.ref}\``,
+      inspections: [
+        `\`GitInspect({ operation: "show", revision: "${target.ref}" })\``,
+      ],
+    }
+  }
+  if (target.kind === "branch") {
+    const base = target.base
+    return {
+      scope: base
+        ? `topic-branch changes from the merge-base of \`${base}\` and \`HEAD\``
+        : "topic-branch changes from the repository's primary base branch",
+      inspections: base
+        ? [
+            `\`GitInspect({ operation: "diff", revision: "${base}", mergeBase: true })\``,
+          ]
+        : [
+            "`GitInspect({ operation: \"log\", limit: 50 })` to identify the primary base branch (prefer the tracked origin default, then origin/main, main, origin/master, or master)",
+            "`GitInspect({ operation: \"diff\", revision: \"<identified-base>\", mergeBase: true })`",
+          ],
+    }
+  }
+  return {
+    scope: "all uncommitted changes (staged, unstaged, and untracked)",
+    inspections: [
+      '`GitInspect({ operation: "status" })`',
+      '`GitInspect({ operation: "diff" })`',
+    ],
+  }
+}
+
+export function buildReviewInstruction(request: ReviewRequest): string {
+  const target = targetInstructions(request.target)
+  const guidance = request.guidance?.trim()
+  return `${REVIEW_RUBRIC}
+
+## Review target
+
+Review ${target.scope}.
+
+Use the read-only Git inspection capability with:
+${target.inspections.map((inspection) => `- ${inspection}`).join("\n")}
+
+${guidance ? `## User focus\n\n${guidance}\n\n` : ""}Inspect the actual change and enough surrounding code before producing the report.`
+}
 
 function countChanges(file: DiffFile): { additions: number; deletions: number } {
   let additions = 0
@@ -144,21 +271,6 @@ function formatFileList(files: DiffFile[]): string {
       return `- ${status} ${f.path}${renamed} (+${additions}, -${deletions})`
     })
     .join("\n")
-}
-
-function buildToolsSection(scope: "uncommitted" | "branch", baseBranch?: string, currentBranch?: string): string {
-  if (scope === "uncommitted") {
-    return `Use these git commands to explore the changes:
-  - View all changes: \`git diff && git diff --cached\`
-  - View specific file change: \`git diff -- <file> && git diff --cached -- <file>\`
-  - View commit history: \`git log\`
-  - View file history: \`git blame <file>\``
-  }
-  return `Use these git commands to explore the changes:
-  - View branch diff: \`git diff ${baseBranch}...${currentBranch}\`
-  - View specific file diff: \`git diff ${baseBranch}...${currentBranch} -- <file>\`
-  - View commit history: \`git log\`
-  - View file history: \`git blame <file>\``
 }
 
 /**
@@ -294,40 +406,43 @@ export async function getBranchChanges(cwd: string, baseBranch?: string): Promis
 
 /**
  * Build review prompt for uncommitted changes only (staged + unstaged).
- * Kilocode 1:1 — same prompt and behaviour.
+ * Includes an initial snapshot for fast orientation; GitInspect remains the
+ * source of truth during the reviewer turn.
  */
-export async function buildReviewPromptUncommitted(cwd: string): Promise<string> {
+export async function buildReviewPromptUncommitted(
+  cwd: string,
+  guidance?: string,
+): Promise<string> {
   const diff = await getUncommittedChanges(cwd)
-
-  if (diff.files.length === 0) {
-    const scopeDescription = "**uncommitted changes**"
-    return EMPTY_DIFF_PROMPT.replaceAll("${SCOPE_DESCRIPTION}", scopeDescription)
-  }
-
-  const scopeDescription = "**uncommitted changes**"
-  const fileList = formatFileList(diff.files)
-  return REVIEW_PROMPT.replaceAll("${SCOPE_DESCRIPTION}", scopeDescription)
-    .replace("${FILE_LIST}", fileList)
-    .replace("${TOOLS}", buildToolsSection("uncommitted"))
+  const instruction = buildReviewInstruction({
+    target: { kind: "uncommitted" },
+    ...(guidance?.trim() ? { guidance: guidance.trim() } : {}),
+  })
+  const snapshot =
+    diff.files.length > 0
+      ? `\n\n## Initial changed-file snapshot\n\n${formatFileList(diff.files)}`
+      : "\n\n## Initial changed-file snapshot\n\nNo tracked diff was detected. Still inspect `git status --short` for untracked files before concluding that there is nothing to review."
+  return `${instruction}${snapshot}`
 }
 
 /**
  * Build review prompt for branch diff vs base branch.
- * Kilocode 1:1 — same prompt and behaviour.
+ * Includes an initial branch snapshot while preserving read-only inspection.
  */
-export async function buildReviewPromptBranch(cwd: string): Promise<string> {
-  const base = await getBaseBranch(cwd)
-  const currentBranch = await getCurrentBranch(cwd)
+export async function buildReviewPromptBranch(
+  cwd: string,
+  baseBranch?: string,
+  guidance?: string,
+): Promise<string> {
+  const base = baseBranch?.trim() || (await getBaseBranch(cwd))
   const diff = await getBranchChanges(cwd, base)
-
-  if (diff.files.length === 0) {
-    const scopeDescription = `**branch diff**: \`${currentBranch}\` -> \`${base}\``
-    return EMPTY_DIFF_PROMPT.replaceAll("${SCOPE_DESCRIPTION}", scopeDescription)
-  }
-
-  const scopeDescription = `**branch diff**: \`${currentBranch}\` -> \`${base}\``
-  const fileList = formatFileList(diff.files)
-  return REVIEW_PROMPT.replaceAll("${SCOPE_DESCRIPTION}", scopeDescription)
-    .replace("${FILE_LIST}", fileList)
-    .replace("${TOOLS}", buildToolsSection("branch", base, currentBranch))
+  const instruction = buildReviewInstruction({
+    target: { kind: "branch", base },
+    ...(guidance?.trim() ? { guidance: guidance.trim() } : {}),
+  })
+  const snapshot =
+    diff.files.length > 0
+      ? `\n\n## Initial changed-file snapshot\n\n${formatFileList(diff.files)}`
+      : "\n\n## Initial changed-file snapshot\n\nNo changed files were detected for this branch target."
+  return `${instruction}${snapshot}`
 }

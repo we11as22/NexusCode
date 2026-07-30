@@ -16,7 +16,8 @@ describe("session selection", () => {
   })
 
   it("validates runtime modes instead of silently falling back", () => {
-    expect(resolveRuntimeMode("review")).toBe("review")
+    expect(resolveRuntimeMode("debug")).toBe("debug")
+    expect(() => resolveRuntimeMode("review")).toThrow("Use /review")
     expect(() => resolveRuntimeMode("typo")).toThrow(
       "Invalid mode: typo",
     )
@@ -26,7 +27,7 @@ describe("session selection", () => {
     expect(cycleRuntimeMode("agent")).toBe("plan")
     expect(cycleRuntimeMode("plan")).toBe("ask")
     expect(cycleRuntimeMode("ask")).toBe("debug")
-    expect(cycleRuntimeMode("debug")).toBe("review")
+    expect(cycleRuntimeMode("debug")).toBe("agent")
     expect(cycleRuntimeMode("review")).toBe("agent")
     expect(cycleRuntimeMode("unknown")).toBe("agent")
   })

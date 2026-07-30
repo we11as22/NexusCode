@@ -3,7 +3,6 @@ import { useChatStore } from "../stores/chat.js"
 import {
   appliedFileLabel,
   inputContextPanelKind,
-  reviewActionForFileCount,
   uniqueEditedFileCount,
 } from "./input-context-panel-policy.js"
 
@@ -78,14 +77,13 @@ export function InputContextPanel() {
               <button
                 type="button"
                 className="nexus-input-context-btn nexus-input-context-btn-active"
-                title={n === 1 ? "Open the file diff" : "Expand the file list to review diffs"}
-                onClick={() => {
-                  if (reviewActionForFileCount(n) === "open-single") {
-                    openSessionEditDiff(sessionEditsForPanel[0]!.path)
-                  } else {
-                    setExpanded(true)
-                  }
-                }}
+                title="Launch a read-only reviewer agent for these changes"
+                disabled={store.isRunning || store.awaitingApproval}
+                onClick={() =>
+                  store.sendMessage("/review", {
+                    displayText: `Review ${n === 1 ? "this change" : `these ${n} changed files`}`,
+                  })
+                }
               >
                 Review
               </button>

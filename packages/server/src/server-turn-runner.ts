@@ -5,6 +5,7 @@ import {
   Session,
   deriveSessionTitle,
   hashWorkspaceIdentity,
+  getSessionModeForResume,
   loadSession,
   saveSession,
   type AgentEvent,
@@ -283,7 +284,12 @@ export class ServerTurnRunner implements TurnRunner {
         : {}),
     })
     const content = inputContent(context)
-    session.setMode(context.execution.mode)
+    const persistentMode = getSessionModeForResume(session, "agent")
+    session.setMode(
+      context.execution.mode === "review"
+        ? persistentMode
+        : context.execution.mode,
+    )
     session.addMessage(
       {
         role: "user",
@@ -403,6 +409,9 @@ export class ServerTurnRunner implements TurnRunner {
     try {
       // Catch provider failures and interrupts that happen between loop
       // checkpoints. This preserves partial assistant/tool/compaction evidence.
+      if (context.execution.mode === "review") {
+        session.setMode(persistentMode)
+      }
       await session.save()
     } catch (error) {
       result = {

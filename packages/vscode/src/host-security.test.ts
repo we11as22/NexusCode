@@ -60,7 +60,7 @@ describe("VS Code host workspace authority wiring", () => {
   it("does not report opening an MCP login URL as completed authentication", () => {
     const body = methodBody(
       "async requestMcpAuthentication(",
-      "private getOrCreateNexusTerminal(",
+      "async showApprovalDialog(",
     )
     expect(body).toContain("success: false")
     expect(body).toContain("pending: true")

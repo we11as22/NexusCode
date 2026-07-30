@@ -62,7 +62,14 @@ describe("webview host protocol", () => {
     { type: "not-a-command" },
     { type: "abort", forged: true },
     { type: "newMessage", content: "missing identity", mode: "agent" },
+    {
+      type: "newMessage",
+      clientMessageId: "forged-review-mode",
+      content: "not a review command",
+      mode: "review",
+    },
     { type: "setMode", mode: "root" },
+    { type: "setMode", mode: "review" },
     { type: "openFileAtLocation", path: "../outside", line: 0 },
     { type: "fetchMarketplaceData", skillPage: 0 },
   ])("rejects unknown, malformed, or over-permissive requests: %j", (input) => {

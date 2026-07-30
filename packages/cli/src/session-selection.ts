@@ -5,8 +5,8 @@ export const RUNTIME_MODES = [
   "plan",
   "ask",
   "debug",
-  "review",
 ] as const satisfies readonly Mode[]
+type RuntimeMode = (typeof RUNTIME_MODES)[number]
 
 export function resolveRuntimeServerUrl(
   explicit: string | null | undefined,
@@ -17,12 +17,14 @@ export function resolveRuntimeServerUrl(
 }
 
 export function resolveRuntimeMode(raw: string | undefined): Mode {
-  if (RUNTIME_MODES.includes(raw as Mode)) return raw as Mode
-  throw new Error(`Invalid mode: ${raw ?? ""}. Expected agent, plan, ask, debug, or review.`)
+  if (RUNTIME_MODES.includes(raw as RuntimeMode)) return raw as RuntimeMode
+  throw new Error(
+    `Invalid mode: ${raw ?? ""}. Expected agent, plan, ask, or debug. Use /review for a reviewer turn.`,
+  )
 }
 
 export function cycleRuntimeMode(current: string): Mode {
-  const index = RUNTIME_MODES.indexOf(current as Mode)
+  const index = RUNTIME_MODES.indexOf(current as RuntimeMode)
   return RUNTIME_MODES[(index + 1) % RUNTIME_MODES.length] ?? "agent"
 }
 

@@ -505,7 +505,7 @@ ${commandList}`,
     .option('--profile <name>', 'Named profile from nexus.yaml', String)
     .option(
       '--mode <mode>',
-      'Override mode: agent | ask | plan | debug | review (resumed sessions keep their saved mode)',
+      'Override mode: agent | ask | plan | debug (use /review for a reviewer turn; resumed sessions keep their saved mode)',
       String,
     )
     .action(

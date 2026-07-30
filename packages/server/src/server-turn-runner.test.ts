@@ -37,6 +37,7 @@ function createMemorySessionStore(
   store: ServerTurnSessionStore
   messages(sessionId: string): SessionMessage[]
   mode(sessionId: string): Mode | undefined
+  setMode(sessionId: string, mode: Mode): void
   planReturnMode(sessionId: string): NonPlanMode | undefined
 } {
   const records = new Map(
@@ -115,6 +116,9 @@ function createMemorySessionStore(
     },
     messages: (sessionId) => record(sessionId).messages,
     mode: (sessionId) => record(sessionId).mode,
+    setMode: (sessionId, mode) => {
+      record(sessionId).mode = mode
+    },
     planReturnMode: (sessionId) => record(sessionId).planReturnMode,
   }
 }
@@ -204,6 +208,90 @@ describe("ServerTurnRunner", () => {
     } finally {
       await services.parallelAgentManager.shutdown()
       services.backgroundProcesses.close()
+      approvals.close()
+      database.close()
+    }
+  })
+
+  it("runs review as a command-scoped execution without replacing the durable chat mode", async () => {
+    const workspace = temporaryDirectory("nexus-turn-review-workspace-")
+    const database = NexusStateDatabase.open({
+      path: join(
+        temporaryDirectory("nexus-turn-review-state-"),
+        "state.sqlite",
+      ),
+    })
+    const state = new SessionRuntimeRepository(database)
+    const leases = new RuntimeRepository(database)
+    const approvals = new SessionApprovalBroker()
+    state.ensureWorkspaceSession({
+      workspaceId: "workspace-review",
+      canonicalPath: workspace,
+      sessionId: "session-review",
+    })
+    const lease = leases.claimSession({
+      sessionId: "session-review",
+      ownerId: "server-review",
+      ttlMs: 60_000,
+    })
+    const fence = { ownerId: lease.ownerId, leaseEpoch: lease.epoch }
+    state.prepareCommand({
+      command: {
+        version: 2,
+        type: "start_turn",
+        commandId: "command-review",
+        sessionId: "session-review",
+        inputId: "input-review",
+        input: [{ type: "text", text: "/review branch main" }],
+        mode: "review",
+      },
+      fence,
+    })
+    const turn = state.claimNextTurn({
+      sessionId: "session-review",
+      epochs: { configEpoch: 1, contextEpoch: 1 },
+      fence,
+    })!
+    const sessionStore = createMemorySessionStore(["session-review"])
+    sessionStore.setMode("session-review", "ask")
+    const execute = vi.fn(async (options: RunSessionOptions) => {
+      expect(options.mode).toBe("review")
+      expect(options.session.getMode()).toBe("ask")
+      options.session.addMessage({
+        role: "assistant",
+        content: "APPROVE",
+      })
+    })
+    const runner = new ServerTurnRunner({
+      canonicalDirectory: workspace,
+      state,
+      approvals,
+      execute,
+      sessions: sessionStore.store,
+    })
+
+    try {
+      await expect(
+        runner.run({
+          sessionId: "session-review",
+          turnId: turn.turnId,
+          runId: turn.runId,
+          input: turn.input,
+          epochs: turn.epochs,
+          execution: turn.execution,
+          fence: turn.fence,
+          signal: new AbortController().signal,
+          setPhase: async () => undefined,
+          safeBoundary: async () => [],
+        }),
+      ).resolves.toEqual({ status: "completed" })
+      expect(execute).toHaveBeenCalledOnce()
+      expect(sessionStore.mode("session-review")).toBe("ask")
+      expect(sessionStore.messages("session-review")).toMatchObject([
+        { role: "user", mode: "review" },
+        { role: "assistant", content: "APPROVE" },
+      ])
+    } finally {
       approvals.close()
       database.close()
     }

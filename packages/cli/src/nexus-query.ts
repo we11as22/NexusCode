@@ -31,6 +31,7 @@ import {
   SessionTurnTerminalError,
   ChangeSetService,
   hashWorkspaceIdentity,
+  getSessionModeForResume,
   type AgentEvent,
   type ToolDef,
 } from '@nexuscode/core'
@@ -350,7 +351,11 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
   const mode = (modeOverride ?? bootstrapMode) as 'agent' | 'plan' | 'ask' | 'debug' | 'review'
 
   let session = bootstrapSession
-  session.setMode(mode)
+  const persistentMode =
+    mode === 'review'
+      ? getSessionModeForResume(session, 'agent')
+      : mode
+  session.setMode(persistentMode)
   // Local loop mutates this Session; server persists via HTTP and adds the user turn in runSession.
   if (!serverUrl) {
     session.addMessage({
@@ -601,7 +606,9 @@ export async function* queryNexus(opts: QueryNexusOptions): AsyncGenerator<Messa
             approvalRef: tuiApprovalRef,
             cursorStore,
             onActiveExecution: (execution) => {
-              nexus.mode = execution.mode
+              if (execution.mode !== 'review') {
+                nexus.mode = execution.mode
+              }
             },
             deliver: deliverRemoteEvent,
           })

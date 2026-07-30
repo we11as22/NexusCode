@@ -198,6 +198,29 @@ describe("GitService.diff", () => {
     ])
   })
 
+  it("uses merge-base semantics for topic-branch review", async () => {
+    const repository = await makeRepository()
+    await fs.writeFile(path.join(repository, "shared.txt"), "baseline\n")
+    await commitAll(repository, "baseline")
+    await execa("git", ["switch", "-c", "topic"], { cwd: repository })
+    await fs.writeFile(path.join(repository, "topic.txt"), "topic\n")
+    await commitAll(repository, "topic change")
+    await execa("git", ["switch", "main"], { cwd: repository })
+    await fs.writeFile(path.join(repository, "main-only.txt"), "main\n")
+    await commitAll(repository, "main change after divergence")
+    await execa("git", ["switch", "topic"], { cwd: repository })
+
+    const result = await new GitService(repository).diff({
+      scope: "range",
+      from: "main",
+      to: "HEAD",
+      mergeBase: true,
+      detail: "patch",
+    })
+
+    expect(result.files.map((file) => file.path)).toEqual(["topic.txt"])
+  })
+
   it("keeps staged and working-tree scopes distinct for the same file", async () => {
     const repository = await makeRepository()
     await fs.writeFile(path.join(repository, "layers.txt"), "before\n")

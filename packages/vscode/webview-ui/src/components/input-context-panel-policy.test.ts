@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest"
 import {
   appliedFileLabel,
   inputContextPanelKind,
-  reviewActionForFileCount,
   uniqueEditedFileCount,
 } from "./input-context-panel-policy.js"
 
@@ -33,13 +32,6 @@ describe("inputContextPanelKind", () => {
         appliedEditCount: 1,
       }),
     ).toBe("none")
-  })
-})
-
-describe("reviewActionForFileCount", () => {
-  it("opens a single diff directly and expands multi-file changes", () => {
-    expect(reviewActionForFileCount(1)).toBe("open-single")
-    expect(reviewActionForFileCount(2)).toBe("expand-list")
   })
 })
 

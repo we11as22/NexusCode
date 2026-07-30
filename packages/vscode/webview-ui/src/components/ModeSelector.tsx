@@ -1,12 +1,12 @@
 import React from "react"
-import { useChatStore, type Mode } from "../stores/chat.js"
+import { useChatStore } from "../stores/chat.js"
+import type { UserSelectableMode } from "./user-mode-policy.js"
 
-const MODES: Array<{ id: Mode; label: string; icon: string; description: string }> = [
+const MODES: Array<{ id: UserSelectableMode; label: string; icon: string; description: string }> = [
   { id: "agent", label: "Agent", icon: "A", description: "Full execution: files, shell, orchestration" },
   { id: "plan", label: "Plan", icon: "P", description: "Plan files only under .nexus/plans; no shell" },
   { id: "ask", label: "Ask", icon: "Q", description: "Read-only Q&A + safe delegation" },
   { id: "debug", label: "Debug", icon: "D", description: "Like agent; diagnose then fix" },
-  { id: "review", label: "Review", icon: "R", description: "Audit via git/read; no edits" },
 ]
 
 export function ModeSelector() {

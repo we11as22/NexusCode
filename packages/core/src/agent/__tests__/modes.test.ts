@@ -28,6 +28,9 @@ describe("mode tool reachability", () => {
     expect(visibleNames("review")).not.toContain("PowerShell")
     expect(visibleNames("review")).not.toContain("Write")
     expect(visibleNames("review")).not.toContain("Edit")
+    expect(visibleNames("review")).not.toContain("Parallel")
+    expect(visibleNames("review")).not.toContain("AskFollowupQuestion")
+    expect(visibleNames("review")).not.toContain("TodoWrite")
     expect(visibleNames("ask")).not.toContain("Bash")
     expect(visibleNames("plan")).not.toContain("Bash")
     expect(visibleNames("ask")).not.toContain("McpAuthenticate")
@@ -112,11 +115,12 @@ describe("mode tool reachability", () => {
     registry.registerDynamicOrThrow(readOnlyTool)
     registry.registerDynamicOrThrow(mutatingTool)
 
-    for (const mode of ["plan", "ask", "review"] as const) {
+    for (const mode of ["plan", "ask"] as const) {
       const names = registry.getForMode(mode).dynamic.map((tool) => tool.name)
       expect(names).toContain("external_read")
       expect(names).not.toContain("external_mutation")
     }
+    expect(registry.getForMode("review").dynamic).toEqual([])
     for (const mode of ["agent", "debug"] as const) {
       const names = registry.getForMode(mode).dynamic.map((tool) => tool.name)
       expect(names).toContain("external_read")
@@ -136,6 +140,20 @@ describe("mode tool reachability", () => {
       tool!.parameters.safeParse({
         operation: "show",
         revision: "HEAD;touch-pwned",
+      }).success,
+    ).toBe(false)
+    expect(
+      tool!.parameters.safeParse({
+        operation: "diff",
+        revision: "origin/main",
+        mergeBase: true,
+      }).success,
+    ).toBe(true)
+    expect(
+      tool!.parameters.safeParse({
+        operation: "show",
+        revision: "HEAD",
+        mergeBase: true,
       }).success,
     ).toBe(false)
   })

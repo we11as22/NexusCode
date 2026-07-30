@@ -314,6 +314,22 @@ describe("server boundary", () => {
     )
   })
 
+  it("does not allow the command-scoped reviewer to become a durable session mode", async () => {
+    const response = await app().request("/session/session_review/mode", {
+      method: "PATCH",
+      headers: {
+        ...authHeaders(),
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ mode: "review" }),
+    })
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual({
+      error: "Review is command-scoped; use /review from an Agent, Plan, Ask, or Debug session",
+    })
+  })
+
   it("rejects unsafe session identifiers before they reach storage", async () => {
     const response = await app().request("/session/%2e%2e%5cescape", {
       headers: authHeaders(),

@@ -159,6 +159,12 @@ export interface GitDiffRequest {
   readonly scope: GitDiffScope
   readonly from?: string
   readonly to?: string
+  /**
+   * Compare the merge-base of `from` and `to` with `to` (Git's `A...B`
+   * semantics). This is the correct scope for reviewing a topic branch
+   * without reporting unrelated commits added to its base after divergence.
+   */
+  readonly mergeBase?: boolean
   readonly paths?: readonly string[]
   readonly detail?: "summary" | "patch"
 }

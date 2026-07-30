@@ -9,6 +9,7 @@ const vscodeState = vi.hoisted(() => ({
   applyResult: true,
   applyCalls: 0,
   openedExternalUrls: [] as string[],
+  createdTerminals: 0,
 }))
 
 vi.mock("vscode", () => {
@@ -106,7 +107,13 @@ vi.mock("vscode", () => {
         return true
       },
     },
-    window: {},
+    window: {
+      createTerminal() {
+        vscodeState.createdTerminals += 1
+        throw new Error("Agent commands must not create a visible terminal")
+      },
+      terminals: [],
+    },
     commands: {},
     languages: {},
     env: {
@@ -185,6 +192,7 @@ beforeEach(() => {
   vscodeState.applyResult = true
   vscodeState.applyCalls = 0
   vscodeState.openedExternalUrls.splice(0)
+  vscodeState.createdTerminals = 0
 })
 
 afterEach(() => {
@@ -200,6 +208,27 @@ describe("VsCodeHost dirty editor authority", () => {
     expect(host.capabilities).toEqual({
       interactiveQuestions: true,
     })
+  })
+
+  it("runs agent commands in the captured background process even when legacy terminal execution is requested", async () => {
+    const workspace = makeWorkspace()
+    const host = new VsCodeHost(
+      workspace,
+      () => {},
+      { runCommandsInTerminal: true } as never,
+    )
+
+    const result = await host.runCommand(
+      `${JSON.stringify(process.execPath)} -e "process.stdout.write(process.cwd())"`,
+      workspace,
+    )
+
+    expect(result).toEqual({
+      stdout: fs.realpathSync(workspace),
+      stderr: "",
+      exitCode: 0,
+    })
+    expect(vscodeState.createdTerminals).toBe(0)
   })
 
   it("captures the authoritative dirty buffer for durable changes", async () => {

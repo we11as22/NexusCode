@@ -593,8 +593,8 @@ html, body, #root {
 }
 
 .nexus-session-tab-close:hover {
-  color: var(--vscode-errorForeground, #f14c4c);
-  background: var(--vscode-inputValidation-errorBackground, rgba(241, 76, 76, 0.15));
+  color: var(--vscode-foreground);
+  background: var(--vscode-list-hoverBackground);
 }
 
 .nexus-session-tab-bar-actions {
@@ -620,6 +620,11 @@ html, body, #root {
 .nexus-session-tab-add:hover {
   color: var(--vscode-foreground);
   background: var(--vscode-list-hoverBackground);
+}
+
+.nexus-session-tab-action-active {
+  color: var(--vscode-foreground);
+  background: var(--vscode-list-activeSelectionBackground);
 }
 
 .nexus-session-tab-dropdown-wrap {
@@ -661,8 +666,8 @@ html, body, #root {
   overflow: hidden;
 }
 
-.nexus-session-tab-dropdown-list {
-  overflow-y: auto;
+.nexus-session-actions-menu {
+  min-width: 160px;
   padding: 4px 0;
 }
 
@@ -681,24 +686,6 @@ html, body, #root {
 }
 
 .nexus-session-tab-dropdown-item:hover {
-  background: var(--vscode-list-hoverBackground);
-}
-
-.nexus-session-tab-dropdown-item-active {
-  background: var(--vscode-list-activeSelectionBackground);
-}
-
-.nexus-session-tab-dropdown-more {
-  padding: 8px 12px;
-  border-top: 1px solid var(--vscode-panel-border);
-  background: transparent;
-  cursor: pointer;
-  color: var(--vscode-textLink-foreground);
-  font-size: 12px;
-  text-align: left;
-}
-
-.nexus-session-tab-dropdown-more:hover {
   background: var(--vscode-list-hoverBackground);
 }
 
@@ -1942,6 +1929,21 @@ html, body, #root {
   line-height: 1.3;
 }
 
+.nexus-plan-dismiss-btn {
+  border: 0;
+  background: transparent;
+  color: var(--vscode-descriptionForeground);
+  padding: 5px 7px;
+  border-radius: 6px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.nexus-plan-dismiss-btn:hover {
+  color: var(--vscode-foreground);
+  background: var(--vscode-list-hoverBackground);
+}
+
 .nexus-plan-followup-textarea {
   width: 100%;
   min-height: 72px;
@@ -2764,6 +2766,18 @@ html, body, #root {
   color: var(--vscode-input-foreground, var(--vscode-foreground));
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.nexus-reviewer-turn-label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 5px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
 }
 
 .message-list-item {

@@ -28,8 +28,7 @@ export function NexusPlanFollowupPanel({
   const options = useMemo(
     () => [
       'Yes, implement this plan',
-      'Revise the plan with feedback',
-      'Exit Plan without implementing',
+      'No, and tell Nexus what to do differently',
     ],
     [],
   )
@@ -74,17 +73,15 @@ export function NexusPlanFollowupPanel({
       setMode('instruct')
       return
     }
-    if (input === '3') {
+    if (key.escape) {
       void onAbandon()
       return
     }
     if (key.return) {
       if (selectedIndex === 0) {
         void onImplement()
-      } else if (selectedIndex === 1) {
-        setMode('instruct')
       } else {
-        void onAbandon()
+        setMode('instruct')
       }
     }
   })
@@ -95,7 +92,7 @@ export function NexusPlanFollowupPanel({
     <Box flexDirection="column" marginTop={1}>
       <Text color={theme.secondaryBorder}>{separator}</Text>
       <Box marginTop={1}>
-        <Text bold>Ready to code?</Text>
+        <Text bold>Implement this plan?</Text>
       </Box>
       <Box marginTop={1} borderStyle="single" borderColor={theme.secondaryBorder} paddingX={1} width={Math.max(20, columns - 2)}>
         <Text wrap="wrap">{applyMarkdown(planText)}</Text>
@@ -109,7 +106,7 @@ export function NexusPlanFollowupPanel({
             </Text>
           ))}
           <Box marginTop={1}>
-            <Text dimColor>↑/↓ choose · Enter confirm · Esc keeps Plan active</Text>
+            <Text dimColor>↑/↓ choose · Enter confirm · Esc dismisses without implementing</Text>
           </Box>
         </Box>
       ) : (

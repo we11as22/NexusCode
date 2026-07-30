@@ -17,3 +17,13 @@ export interface DiffResult {
   files: DiffFile[]
   raw: string
 }
+
+export type ReviewTarget =
+  | { kind: "uncommitted" }
+  | { kind: "branch"; base?: string }
+  | { kind: "commit"; ref: string }
+
+export interface ReviewRequest {
+  target: ReviewTarget
+  guidance?: string
+}

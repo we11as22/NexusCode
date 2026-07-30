@@ -350,7 +350,11 @@ function diffArguments(
   } else if (request.scope === "combined") {
     args.push("HEAD")
   } else if (request.scope === "range") {
-    args.push(request.from!, request.to!)
+    if (request.mergeBase) {
+      args.push(`${request.from!}...${request.to!}`)
+    } else {
+      args.push(request.from!, request.to!)
+    }
   }
   args.push("--")
   if (candidate.oldPath) args.push(candidate.oldPath)
@@ -487,8 +491,9 @@ async function rangeCandidates(
     "--name-status",
     "-z",
     "--find-renames",
-    request.from,
-    request.to,
+    ...(request.mergeBase
+      ? [`${request.from}...${request.to}`]
+      : [request.from, request.to]),
     "--",
     ...(request.paths ?? []),
   ]

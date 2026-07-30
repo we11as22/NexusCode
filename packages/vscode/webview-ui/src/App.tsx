@@ -23,7 +23,6 @@ import { confirmAsync, resolveConfirm, postMessage } from "./vscode.js"
 import { MarketplacePanel } from "./components/marketplace/MarketplacePanel.js"
 import { createExtensionMessageBuffer } from "./bridge/message-buffer.js"
 import {
-  visibleSessionDropdown,
   visibleSessionTabs,
 } from "./components/session-tab-policy.js"
 import {
@@ -31,6 +30,10 @@ import {
   visibleSessionHistory,
 } from "./components/session-history-policy.js"
 import { planKeyboardAction } from "./components/plan-keyboard-policy.js"
+import {
+  planFollowupAction,
+  PLAN_FOLLOWUP_OPTIONS,
+} from "./components/plan-followup-policy.js"
 import { ProjectAuthorityRequestCard } from "./components/ProjectAuthorityRequestCard.js"
 import { sessionDisplayTitle } from "./utils/session-label.js"
 
@@ -122,12 +125,7 @@ export function App() {
 
   return (
     <div className="container">
-      {/* View switched via sidebar title icons; optional in-webview nav for quick switch */}
-      <div className="nexus-nav nexus-nav-minimal">
-        <TabButton active={store.view === "chat"} onClick={() => store.setView("chat")} label="Chat" />
-        <TabButton active={store.view === "sessions"} onClick={() => store.setView("sessions")} label="Sessions" />
-        <TabButton active={store.view === "settings"} onClick={() => store.setView("settings")} label="Settings" />
-      </div>
+      <SessionTabBar />
 
       {store.vectorDbProgressMessage && (
         <div className="flex-shrink-0 px-3 py-1.5 border-b border-[var(--vscode-panel-border)] bg-[var(--vscode-badge-background)] text-[11px] text-[var(--vscode-descriptionForeground)]">
@@ -251,7 +249,6 @@ function ChatView() {
       )}
 
       <div className="chat-view">
-        <SessionTabBar />
         <div className="chat-messages-wrapper">
           <div className="chat-messages">
             <MessageList
@@ -335,6 +332,16 @@ function ChatBottomBar() {
     !store.awaitingApproval &&
     (store.inputValue.trim().length > 0 || store.attachedImages.length > 0)
   const contextPercent = store.contextPercent
+  const contextSourceLabel =
+    store.contextSource === "provider"
+      ? "provider measured"
+      : store.contextSource === "hybrid"
+        ? "provider measured + estimated pending turn"
+        : "estimated"
+  const contextTitle =
+    store.contextLimitTokens > 0
+      ? `${formatTokens(store.contextUsedTokens)}/${formatTokens(store.contextLimitTokens)} tokens (${Math.round(contextPercent)}%) · ${contextSourceLabel}`
+      : `${formatTokens(store.contextUsedTokens)}/— tokens · model context window unknown · ${contextSourceLabel}`
 
   const planChoice = (
     choice: "implement" | "revise" | "abandon",
@@ -397,12 +404,8 @@ function ChatBottomBar() {
           <button
             type="button"
             className="nexus-context-ring-btn"
-            title={
-              store.contextLimitTokens > 0
-                ? `${Math.round(contextPercent)}% context used`
-                : `${formatTokens(store.contextUsedTokens)} used; model context window unknown`
-            }
-            aria-label="Context"
+            title={contextTitle}
+            aria-label={`Context: ${contextTitle}`}
           >
             <ContextRingIcon className="w-4 h-4" percent={contextPercent} />
           </button>
@@ -570,10 +573,19 @@ function SessionsView() {
   )
 }
 
-/** Horizontal session tab bar with a bounded recent-session menu and full-history handoff. */
+/** Cursor-style open-chat strip. History and deletion remain separate concerns. */
 function SessionTabBar() {
   const store = useChatStore()
-  const { sessions, sessionId, switchSession, createNewSession, deleteSession, setView, sessionsLoading } = store
+  const {
+    sessions,
+    openSessionIds,
+    sessionId,
+    switchSession,
+    closeSessionTab,
+    createNewSession,
+    setView,
+    view,
+  } = store
   const [dropdownOpen, setDropdownOpen] = React.useState(false)
   const dropdownRef = React.useRef<HTMLDivElement>(null)
 
@@ -586,15 +598,15 @@ function SessionTabBar() {
     return () => document.removeEventListener("click", onDocClick)
   }, [dropdownOpen])
 
-  const displaySessions = visibleSessionTabs(sessions, sessionId)
-  const dropdownSessions = visibleSessionDropdown(sessions, sessionId)
+  const displaySessions = visibleSessionTabs(
+    sessions,
+    openSessionIds,
+    sessionId,
+  )
 
-  const handleDelete = async (e: React.MouseEvent, id: string) => {
+  const handleClose = (e: React.MouseEvent, id: string) => {
     e.stopPropagation()
-    const s = sessions.find((x) => x.id === id)
-    const label = sessionDisplayTitle(s ?? { id })
-    if (!(await confirmAsync(`Delete session "${label}"? This cannot be undone.`))) return
-    deleteSession(id)
+    closeSessionTab(id)
   }
 
   return (
@@ -613,16 +625,19 @@ function SessionTabBar() {
               <button
                 type="button"
                 className="nexus-session-tab-btn"
-                onClick={() => switchSession(s.id)}
+                onClick={() => {
+                  setView("chat")
+                  switchSession(s.id)
+                }}
               >
                 {title}
               </button>
               <button
                 type="button"
                 className="nexus-session-tab-close"
-                onClick={(e) => handleDelete(e, s.id)}
-                title="Delete session"
-                aria-label="Delete session"
+                onClick={(e) => handleClose(e, s.id)}
+                title="Close chat"
+                aria-label={`Close ${title}`}
               >
                 <CloseIcon className="w-3 h-3" />
               </button>
@@ -640,6 +655,15 @@ function SessionTabBar() {
         >
           <PlusIcon className="w-3.5 h-3.5" />
         </button>
+        <button
+          type="button"
+          className={`nexus-session-tab-add ${view === "sessions" ? "nexus-session-tab-action-active" : ""}`}
+          onClick={() => setView("sessions")}
+          title="Session history"
+          aria-label="Session history"
+        >
+          <HistoryIcon className="w-3.5 h-3.5" />
+        </button>
         <div className="nexus-session-tab-dropdown-wrap" ref={dropdownRef}>
           <button
             type="button"
@@ -652,41 +676,26 @@ function SessionTabBar() {
             <EllipsisIcon className="w-3.5 h-3.5" />
           </button>
           {dropdownOpen && (
-            <div className="nexus-session-tab-dropdown">
-              <div className="nexus-session-tab-dropdown-list">
-                {sessionsLoading ? (
-                  <div className="nexus-muted text-xs px-2 py-1.5">Loading...</div>
-                ) : sessions.length === 0 ? (
-                  <div className="nexus-muted text-xs px-2 py-1.5">No sessions</div>
-                ) : (
-                  dropdownSessions.map((s) => {
-                    const isActive = s.id === sessionId
-                    const title = sessionDisplayTitle(s).slice(0, 60)
-                    return (
-                      <button
-                        key={s.id}
-                        type="button"
-                        className={`nexus-session-tab-dropdown-item ${isActive ? "nexus-session-tab-dropdown-item-active" : ""}`}
-                        onClick={() => {
-                          switchSession(s.id)
-                          setDropdownOpen(false)
-                        }}
-                      >
-                        {title}
-                      </button>
-                    )
-                  })
-                )}
-              </div>
+            <div className="nexus-session-tab-dropdown nexus-session-actions-menu">
               <button
                 type="button"
-                className="nexus-session-tab-dropdown-more"
+                className="nexus-session-tab-dropdown-item"
                 onClick={() => {
                   setView("sessions")
                   setDropdownOpen(false)
                 }}
               >
-                Session history…
+                Session history
+              </button>
+              <button
+                type="button"
+                className="nexus-session-tab-dropdown-item"
+                onClick={() => {
+                  setView("settings")
+                  setDropdownOpen(false)
+                }}
+              >
+                Settings
               </button>
             </div>
           )}
@@ -696,8 +705,8 @@ function SessionTabBar() {
   )
 }
 
-/** Kilocode-style: plan_exit completed — decision UI replaces the chat input. */
-function PlanActionsBar({
+/** PlanExit completed: render the plan artifact and its explicit decision UI. */
+export function PlanActionsBar({
   planFollowupText,
   collapsed,
   onChoice,
@@ -711,9 +720,7 @@ function PlanActionsBar({
   onMinimize: () => void
 }) {
   const [showMore, setShowMore] = useState(false)
-  const [selected, setSelected] = useState<
-    "implement" | "revise" | "abandon"
-  >("implement")
+  const [selected, setSelected] = useState<"implement" | "revise">("implement")
   const [instruction, setInstruction] = useState("")
   const fullText = (planFollowupText ?? "").trim()
   const lines = fullText.split(/\r?\n/)
@@ -741,20 +748,20 @@ function PlanActionsBar({
       })
       if (action === "none") return
       event.preventDefault()
-      if (typeof action === "object") {
-        setSelected(
-          action.select === 0
-            ? "implement"
-            : action.select === 1
-              ? "revise"
-              : "abandon",
-        )
+      if (action === "dismiss") {
+        onChoice("abandon")
         return
       }
+      if (typeof action === "object") {
+        setSelected(action.select === 0 ? "implement" : "revise")
+        return
+      }
+      const decision = planFollowupAction(selected, instruction)
+      if (!decision) return
       onChoice(
-        selected,
+        decision.choice,
         planFollowupText ?? undefined,
-        selected === "revise" ? instruction : undefined,
+        "instruction" in decision ? decision.instruction : undefined,
         false,
       )
     }
@@ -807,30 +814,17 @@ function PlanActionsBar({
 
       <div className="nexus-plan-followup-question">Implement this plan?</div>
       <div className="nexus-plan-followup-options">
-        <button
-          type="button"
-          className={`nexus-plan-option ${selected === "implement" ? "nexus-plan-option-active" : ""}`}
-          onClick={() => setSelected("implement")}
-          aria-pressed={selected === "implement"}
-        >
-          1. Yes, implement this plan
-        </button>
-        <button
-          type="button"
-          className={`nexus-plan-option ${selected === "revise" ? "nexus-plan-option-active" : ""}`}
-          onClick={() => setSelected("revise")}
-          aria-pressed={selected === "revise"}
-        >
-          2. Revise the plan with feedback
-        </button>
-        <button
-          type="button"
-          className={`nexus-plan-option ${selected === "abandon" ? "nexus-plan-option-active" : ""}`}
-          onClick={() => setSelected("abandon")}
-          aria-pressed={selected === "abandon"}
-        >
-          3. Exit Plan without implementing
-        </button>
+        {PLAN_FOLLOWUP_OPTIONS.map((option, index) => (
+          <button
+            key={option.id}
+            type="button"
+            className={`nexus-plan-option ${selected === option.id ? "nexus-plan-option-active" : ""}`}
+            onClick={() => setSelected(option.id)}
+            aria-pressed={selected === option.id}
+          >
+            {index + 1}. {option.label}
+          </button>
+        ))}
       </div>
       {selected === "revise" ? (
         <textarea
@@ -841,20 +835,27 @@ function PlanActionsBar({
         />
       ) : null}
       <div className="nexus-plan-followup-submit-row">
-        <span className="nexus-plan-followup-hint">
-          1–3 select · Enter submits · Plan stays active until you choose.
-        </span>
+        <button
+          type="button"
+          className="nexus-plan-dismiss-btn"
+          onClick={() => onChoice("abandon")}
+          title="Exit Plan without implementing"
+        >
+          Dismiss <kbd className="nexus-kbd">Esc</kbd>
+        </button>
         <button
           type="button"
           className="nexus-primary-btn text-xs"
-          onClick={() =>
+          onClick={() => {
+            const decision = planFollowupAction(selected, instruction)
+            if (!decision) return
             onChoice(
-              selected,
+              decision.choice,
               planFollowupText ?? undefined,
-              selected === "revise" ? instruction : undefined,
-              false
+              "instruction" in decision ? decision.instruction : undefined,
+              false,
             )
-          }
+          }}
           disabled={!canSubmit}
         >
           Submit <kbd className="nexus-kbd">⏎</kbd>
@@ -3478,6 +3479,16 @@ function PlusIcon({ className }: { className?: string }) {
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <line x1="12" y1="5" x2="12" y2="19" />
       <line x1="5" y1="12" x2="19" y2="12" />
+    </svg>
+  )
+}
+
+function HistoryIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 12a9 9 0 109-9 9.75 9.75 0 00-6.74 2.74L3 8" />
+      <path d="M3 3v5h5" />
+      <path d="M12 7v5l3 2" />
     </svg>
   )
 }

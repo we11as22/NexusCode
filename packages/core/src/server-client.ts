@@ -1152,7 +1152,7 @@ export class NexusServerClient {
 
   async setSessionMode(
     sessionId: string,
-    mode: Mode,
+    mode: Exclude<Mode, "review">,
     options: { todo?: string } = {},
   ): Promise<void> {
     const res = await this.request(

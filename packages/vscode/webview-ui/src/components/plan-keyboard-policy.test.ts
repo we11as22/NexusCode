@@ -2,10 +2,14 @@ import { describe, expect, it } from "vitest"
 import { planKeyboardAction } from "./plan-keyboard-policy"
 
 describe("Plan decision keyboard policy", () => {
-  it("selects the three visible decisions with number keys", () => {
+  it("selects the two visible decisions with number keys", () => {
     expect(planKeyboardAction({ key: "1", canSubmit: true })).toEqual({ select: 0 })
     expect(planKeyboardAction({ key: "2", canSubmit: true })).toEqual({ select: 1 })
-    expect(planKeyboardAction({ key: "3", canSubmit: true })).toEqual({ select: 2 })
+    expect(planKeyboardAction({ key: "3", canSubmit: true })).toBe("none")
+  })
+
+  it("maps Escape to the separate dismiss action", () => {
+    expect(planKeyboardAction({ key: "Escape", canSubmit: true })).toBe("dismiss")
   })
 
   it("keeps plain Enter in feedback multiline and submits with Cmd/Ctrl+Enter", () => {

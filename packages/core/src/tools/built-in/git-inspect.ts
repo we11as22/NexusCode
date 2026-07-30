@@ -27,6 +27,7 @@ const schema = z
   .object({
     operation: z.enum(["status", "diff", "show", "log", "blame"]),
     revision: revisionSchema.optional(),
+    mergeBase: z.boolean().optional(),
     path: pathSchema.optional(),
     limit: z.coerce.number().int().min(1).max(200).optional(),
   })
@@ -45,6 +46,13 @@ const schema = z
         message: "status does not accept a revision",
       })
     }
+    if (value.mergeBase && (value.operation !== "diff" || !value.revision)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["mergeBase"],
+        message: "mergeBase requires a diff operation with a revision",
+      })
+    }
   })
 
 type GitInspectArgs = z.infer<typeof schema>
@@ -53,7 +61,7 @@ export const gitInspectTool: ToolDef<GitInspectArgs> = {
   name: "GitInspect",
   searchHint: "read-only git status diff show log blame repository inspection",
   description:
-    "Inspect Git state without exposing an arbitrary shell. Supports only status, diff, show, log, and blame with validated revision/path arguments.",
+    "Inspect Git state without exposing an arbitrary shell. Supports only status, diff, show, log, and blame with validated revision/path arguments. For branch review, pass mergeBase=true with a diff revision to compare revision...HEAD.",
   parameters: schema,
   readOnly: true,
   modes: ["review"],
@@ -79,7 +87,11 @@ export const gitInspectTool: ToolDef<GitInspectArgs> = {
       const diff = await git.diff({
         scope: args.revision ? "range" : "combined",
         ...(args.revision
-          ? { from: args.revision, to: "HEAD" }
+          ? {
+              from: args.revision,
+              to: "HEAD",
+              ...(args.mergeBase ? { mergeBase: true } : {}),
+            }
           : {}),
         ...(args.path ? { paths: [args.path] } : {}),
         detail: "patch",

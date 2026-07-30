@@ -25,7 +25,7 @@ interface SlashCommandItem {
 
 const SLASH_COMMANDS: SlashCommandItem[] = [
   // SETTINGS section
-  { name: "mode",       description: "Switch agent mode (agent / plan / ask / debug / review)",  section: "SETTINGS", icon: "⚙", isAction: true },
+  { name: "mode",       description: "Switch agent mode (agent / plan / ask / debug)",  section: "SETTINGS", icon: "⚙", isAction: true },
   { name: "llm",        description: "LLM model & provider settings",                   section: "SETTINGS", icon: "🤖", isAction: true },
   { name: "embeddings", description: "Embeddings model settings",                       section: "SETTINGS", icon: "🔍", isAction: true },
   { name: "index",      description: "Codebase indexer status and controls",            section: "SETTINGS", icon: "📑", isAction: true },
@@ -39,7 +39,7 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
   { name: "create-skill", description: "Create a new skill file",  section: "CREATE", icon: "✨", isAction: true },
   { name: "create-rule",  description: "Create a new rules file",  section: "CREATE", icon: "📋", isAction: true },
   // AGENT section
-  { name: "review", description: "Ask agent to review recent code changes", section: "AGENT", icon: "🔎" },
+  { name: "review", description: "Launch the read-only reviewer for current changes", section: "AGENT", icon: "🔎" },
 ]
 
 export function InputBar({ registerImagePickerTrigger }: { registerImagePickerTrigger?: (trigger: () => void) => void }) {

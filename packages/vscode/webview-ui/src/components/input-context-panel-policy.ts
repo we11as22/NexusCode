@@ -1,9 +1,4 @@
 export type InputContextPanelKind = "none" | "applied-changes"
-export type ReviewAction = "open-single" | "expand-list"
-
-export function reviewActionForFileCount(fileCount: number): ReviewAction {
-  return fileCount === 1 ? "open-single" : "expand-list"
-}
 
 export function uniqueEditedFileCount(
   edits: readonly { readonly path: string }[],

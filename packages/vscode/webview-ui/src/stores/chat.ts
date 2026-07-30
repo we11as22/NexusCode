@@ -1,5 +1,5 @@
 import { create } from "zustand"
-import { postMessage } from "../vscode.js"
+import { getVsCode, postMessage } from "../vscode.js"
 import type {
   ModelsCatalogFromCore,
   AgentPresetFromCore,
@@ -17,19 +17,35 @@ import {
   reduceSubagentState as reduceSubagentStateFromHelpers,
   sanitizeAssistantText as sanitizeAssistantTextFromHelpers,
 } from "../transcript/helpers.js"
+import {
+  closeSessionTab as closeSessionTabState,
+  openSessionTab,
+  persistedSessionTabsState,
+  readPersistedSessionTabs,
+  reconcileSessionTabs,
+} from "../components/session-tab-policy.js"
 
 /** Detects a new plan snapshot so the full follow-up panel re-opens. */
 let planFollowupTextFingerprint: string | null = null
+export type UserSelectableMode = Exclude<Mode, "review">
 const pendingMessageSubmissions = new Map<
   string,
   {
     content: string
     images: Array<{ id: string; data: string; mimeType: string }>
-    mode: Mode
+    mode: UserSelectableMode
     presetName: string
     queueItem?: QueuedTurn
   }
 >()
+const restoredSessionTabs = readPersistedSessionTabs(getVsCode().getState())
+
+function persistSessionTabs(openIds: readonly string[], activeId: string): void {
+  const vscode = getVsCode()
+  vscode.setState(
+    persistedSessionTabsState(vscode.getState(), openIds, activeId),
+  )
+}
 
 export type Mode = "agent" | "plan" | "ask" | "debug" | "review"
 export type AppView = "chat" | "sessions" | "settings"
@@ -37,7 +53,7 @@ export interface QueuedTurn {
   id: string
   text: string
   images: Array<{ id: string; data: string; mimeType: string }>
-  mode: Mode
+  mode: UserSelectableMode
   presetName: string
   createdAt: number
 }
@@ -68,6 +84,8 @@ export interface SessionMessage {
   durationMs?: number
   summary?: boolean
   presetName?: string
+  /** Execution mode for this turn; `review` is command-scoped, not a selectable chat mode. */
+  mode?: Mode
 }
 
 export type MessagePart = TextPart | ToolPart | ReasoningPart
@@ -286,7 +304,7 @@ interface SessionPreview {
 
 interface ChatState {
   messages: SessionMessage[]
-  mode: Mode
+  mode: UserSelectableMode
   isRunning: boolean
   awaitingApproval: boolean
   model: string
@@ -310,6 +328,8 @@ interface ChatState {
   /** Queued messages to send one by one when agent finishes. */
   queuedMessages: QueuedTurn[]
   sessions: SessionPreview[]
+  /** Persisted lightweight chat tabs; durable session history remains separate. */
+  openSessionIds: string[]
   /** True while session list is being fetched (e.g. from server). */
   sessionsLoading: boolean
   /** Optimistic deletions: hide sessions until a fresh list confirms removal or the tombstone expires. */
@@ -360,7 +380,7 @@ interface ChatState {
   /** Whether checkpoints are enabled (from config or current run). */
   checkpointEnabled: boolean
 
-  /** Plan mode: plan_exit was called; show New session / Continue / Dismiss (Kilocode-style). */
+  /** Plan mode: PlanExit completed; show the plan artifact and decision surface. */
   planCompleted: boolean
   /** Plan text for "New session" option. */
   planFollowupText: string | null
@@ -449,13 +469,13 @@ interface ChatState {
   addToQueueFront: (text: string) => void
   editQueuedToInput: (id: string) => void
   sendQueuedImmediately: (id: string) => void
-  setMode: (mode: Mode) => void
+  setMode: (mode: UserSelectableMode) => void
   setProfile: (profileName: string) => void
   sendMessage: (
     content: string,
     options?: {
       displayText?: string
-      mode?: Mode
+      mode?: UserSelectableMode
       images?: Array<{ id: string; data: string; mimeType: string }>
       presetName?: string
       queueItem?: QueuedTurn
@@ -466,6 +486,7 @@ interface ChatState {
   clearChat: () => void
   forkSession: (messageId: string) => void
   switchSession: (sessionId: string) => void
+  closeSessionTab: (sessionId: string) => void
   createNewSession: () => void
   deleteSession: (sessionId: string) => void
   reindex: () => void
@@ -652,6 +673,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   attachedImages: [],
   queuedMessages: [],
   sessions: [],
+  openSessionIds: restoredSessionTabs.openIds,
   sessionsLoading: false,
   pendingDeletedSessionIds: {},
   config: null,
@@ -861,11 +883,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set({ inputValue: "", attachedImages: [] })
       return
     }
-    const reviewRequested = isSlashCommand(text, "review")
-    const runMode: Mode = reviewRequested
-      ? "review"
-      : (options?.mode ?? mode)
-    const runContent = reviewRequested ? buildReviewPromptFromSlash(text) : text
+    // Review is command-scoped. The host resolves /review to its internal
+    // read-only reviewer without changing the persistent chat mode.
+    const runMode: UserSelectableMode = options?.mode ?? mode
+    const runContent = text
     const runPresetName = options?.presetName ?? activePresetName
     const clientMessageId =
       `local_user_${Date.now()}_${Math.random().toString(36).slice(2)}`
@@ -896,6 +917,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           role: "user",
           content: optimisticDisplay,
           presetName: runPresetName,
+          ...(isSlashCommand(text, "review") ? { mode: "review" as const } : {}),
         },
       ],
     }))
@@ -1007,8 +1029,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   switchSession: (sessionId) => {
+    const openSessionIds = openSessionTab(get().openSessionIds, sessionId)
+    persistSessionTabs(openSessionIds, sessionId)
     postMessage({ type: "switchSession", sessionId })
-    set({ view: "chat" })
+    set({ view: "chat", openSessionIds })
+  },
+
+  closeSessionTab: (sessionId) => {
+    const current = get()
+    const closed = closeSessionTabState(
+      current.openSessionIds,
+      sessionId,
+      current.sessionId,
+    )
+    persistSessionTabs(closed.openIds, closed.nextActiveId ?? "")
+    set({ openSessionIds: closed.openIds, view: "chat" })
+    if (sessionId !== current.sessionId) return
+    if (closed.nextActiveId) {
+      postMessage({ type: "switchSession", sessionId: closed.nextActiveId })
+    } else {
+      postMessage({ type: "createNewSession" })
+    }
   },
 
   createNewSession: () => {
@@ -1028,9 +1069,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   deleteSession: (sessionId) => {
+    const openSessionIds = get().openSessionIds.filter((id) => id !== sessionId)
+    persistSessionTabs(
+      openSessionIds,
+      sessionId === get().sessionId ? "" : get().sessionId,
+    )
     postMessage({ type: "deleteSession", sessionId })
     set((prev) => ({
       sessions: prev.sessions.filter((s) => s.id !== sessionId),
+      openSessionIds,
       pendingDeletedSessionIds: {
         ...prev.pendingDeletedSessionIds,
         [sessionId]: Date.now(),
@@ -1104,6 +1151,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
             ? incomingSeq
             : (prev.lastStateUpdateSeq ?? 0),
       }
+      if (typeof state.sessionId === "string" && state.sessionId.length > 0) {
+        next.openSessionIds = openSessionTab(
+          prev.openSessionIds,
+          state.sessionId,
+        )
+        persistSessionTabs(next.openSessionIds, state.sessionId)
+      }
       if (typeof state.sessionId === "string" && state.sessionId !== prev.sessionId && prev.sessionId !== "") {
         next.compactionLog = []
         next.compactionUi = "none"
@@ -1139,8 +1193,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const fp = `${effectivePlanText.length}\0${effectivePlanText.slice(0, 220)}\0${effectivePlanText.slice(-160)}`
         if (fp !== planFollowupTextFingerprint) {
           planFollowupTextFingerprint = fp
-          // New plan snapshots should open in compact-preview mode first so action buttons stay visible.
-          next.planPanelCollapsed = true
+          // The completed plan is the primary decision artifact. Open it on
+          // first presentation like Codex/Kimi, while retaining manual collapse.
+          next.planPanelCollapsed = false
         }
       }
       if (state.planCompleted === false) {
@@ -1201,8 +1256,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
         return true
       })
+      const openSessionIds = reconcileSessionTabs(
+        prev.openSessionIds,
+        visibleSessions,
+        prev.sessionId,
+      )
+      persistSessionTabs(openSessionIds, prev.sessionId)
       return {
         sessions: visibleSessions,
+        openSessionIds,
         pendingDeletedSessionIds: nextPending,
       }
     })
@@ -1509,7 +1571,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         set({
           planCompleted: true,
           planFollowupText: event.planText,
-          planPanelCollapsed: true,
+          planPanelCollapsed: false,
         })
         break
 
@@ -2348,22 +2410,6 @@ function hasRenderableAssistantContent(content: string | MessagePart[]): boolean
 
 function isSlashCommand(text: string, command: string): boolean {
   return new RegExp(`^/${command}(\\s|$)`, "i").test(text.trim())
-}
-
-function buildReviewPromptFromSlash(raw: string): string {
-  const args = raw.replace(/^\/review\s*/i, "").trim()
-  if (args.length > 0) return args
-  return `Run a local code review of uncommitted changes in this repository.
-
-Use git diff against HEAD and inspect changed files.
-Focus on bugs, regressions, security, and missing tests.
-
-Return in this format:
-## Local Review
-### Summary
-### Issues Found
-### Detailed Findings
-### Recommendation`
 }
 
 function stripToolCallMarkup(value: string): string {

@@ -4,6 +4,8 @@ import type {
   UserQuestionAnswer,
 } from "@nexuscode/core"
 
+export type UserSelectableMode = Exclude<Mode, "review">
+
 export type MarketplaceItemReference = {
   id: string
   type: "mcp" | "skill"
@@ -16,7 +18,7 @@ export type WebviewMessage =
       content: string
       /** Bounded user-facing projection when content contains injected context. */
       displayText?: string
-      mode: Mode
+      mode: UserSelectableMode
       mentions?: string
       images?: Array<{ data: string; mimeType: string }>
       presetName?: string
@@ -24,7 +26,7 @@ export type WebviewMessage =
   | { type: "abort" }
   | { type: "compact" }
   | { type: "clearChat" }
-  | { type: "setMode"; mode: Mode }
+  | { type: "setMode"; mode: UserSelectableMode }
   | { type: "setProfile"; profile: string }
   | { type: "getState" }
   | { type: "webviewDidLaunch" }

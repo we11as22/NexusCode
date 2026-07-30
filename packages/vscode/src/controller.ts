@@ -102,6 +102,8 @@ import {
   selectProviderProfile,
   settleRuntimeDependency,
   hashWorkspaceIdentity,
+  buildReviewInstruction,
+  resolveReviewRequest,
 } from "@nexuscode/core"
 import { PendingQuestionCoordinator } from "./question-lifecycle.js"
 import {
@@ -1477,6 +1479,9 @@ export class Controller {
       const created = await client.createSession()
       const pendingTodo = this.session?.getTodo() ?? ""
       const pendingMode = this.session?.getMode()
+      const pendingPersistentMode = pendingMode === "review"
+        ? "agent"
+        : pendingMode
       const pendingPlanReturnMode = this.session?.getPlanReturnMode()
       if (
         this.disposed ||
@@ -1498,7 +1503,7 @@ export class Controller {
         null,
         0,
         null,
-        pendingMode ?? created.mode ?? null,
+        pendingPersistentMode ?? created.mode ?? null,
         pendingPlanReturnMode ?? created.planReturnMode ?? null,
       )
       this.serverSessionId = created.id
@@ -1508,10 +1513,10 @@ export class Controller {
       this.pendingQuestionRequest = null
       this.checkpoint = undefined
       this.postStateToWebview()
-      if (pendingMode || pendingTodo) {
+      if (pendingPersistentMode || pendingTodo) {
         await client.setSessionMode(
           created.id,
-          pendingMode ?? "agent",
+          pendingPersistentMode ?? "agent",
           { todo: pendingTodo },
         )
       }
@@ -1765,7 +1770,9 @@ export class Controller {
         signal: abortController.signal,
         cursorStore: this.getRemoteWorkspaceState(cwd),
         onActiveExecution: (execution) => {
-          this.mode = execution.mode
+          if (execution.mode !== "review") {
+            this.mode = execution.mode
+          }
           this.lastRunMode = execution.mode
           this.forcedRemoteModeForNextRun = null
           this.postStateToWebview()
@@ -2373,7 +2380,9 @@ export class Controller {
     this.setServerConnectionState("error", message)
   }
 
-  private async persistSessionMode(mode: Mode): Promise<void> {
+  private async persistSessionMode(
+    mode: Exclude<Mode, "review">,
+  ): Promise<void> {
     this.mode = mode
     const session = this.session
     if (!session) return
@@ -3595,9 +3604,21 @@ export class Controller {
         }
         break
       case "planFollowupChoice": {
+        if (
+          this.isRunning ||
+          !this.session ||
+          this.mode !== "plan" ||
+          !hadPlanExit(this.session)
+        ) {
+          this.postStateToWebview()
+          break
+        }
         if (msg.choice === "abandon") {
+          const storedReturnMode = this.session.getPlanReturnMode()
           const returnMode =
-            this.session?.getPlanReturnMode() ?? "agent"
+            storedReturnMode === "review"
+              ? "agent"
+              : (storedReturnMode ?? "agent")
           await this.persistSessionMode(returnMode)
           this.postStateToWebview()
           break
@@ -4389,14 +4410,37 @@ export class Controller {
     this.config = liveConfig
 
     const reviewCommand = /^\/review(\s|$)/i.test(trimmedInput)
+    let reviewInstruction: string | null = null
+    if (reviewCommand) {
+      try {
+        const reviewArgs = trimmedInput.replace(/^\/review\s*/i, "").trim()
+        reviewInstruction = buildReviewInstruction(
+          await resolveReviewRequest(this.getCwd(), reviewArgs),
+        )
+      } catch (error) {
+        this.postMessageToWebview({
+          type: "agentEvent",
+          event: {
+            type: "error",
+            error: error instanceof Error ? error.message : String(error),
+          },
+        })
+        this.postStateToWebview()
+        return
+      }
+    }
     const forcedRemoteModeForRun = serverUrl
       ? this.forcedRemoteModeForNextRun
       : null
-    const requestedMode =
+    const requestedModeCandidate =
       forcedRemoteModeForRun ?? mode ?? this.mode
+    const requestedMode: Mode =
+      requestedModeCandidate === "review" ? "agent" : requestedModeCandidate
     this.mode = requestedMode
     const runMode: Mode = reviewCommand ? "review" : requestedMode
-    this.session.setMode(runMode)
+    // Review is an internal command-scoped execution mode. The parent chat
+    // keeps its durable mode while this turn receives review-only tools.
+    this.session.setMode(requestedMode)
     this.lastRunMode = runMode
     this.abortController = new AbortController()
     this.isRunning = true
@@ -4486,20 +4530,7 @@ export class Controller {
       }
     }
     if (reviewCommand) {
-      const reviewArgs = trimmedInput.replace(/^\/review\s*/i, "").trim()
-      actualContent =
-        reviewArgs ||
-        `Run a local code review of uncommitted changes in this repository.
-
-Use git diff against HEAD and inspect changed files.
-Focus on bugs, regressions, security, and missing tests.
-
-Return in this format:
-## Local Review
-### Summary
-### Issues Found
-### Detailed Findings
-### Recommendation`
+      actualContent = reviewInstruction!
     }
     if (content.trim().toLowerCase().startsWith("/create-skill")) {
       createSkillMode = true
@@ -4805,7 +4836,7 @@ Return in this format:
       // emits its terminal error and then rejects with that same error.
       rememberFatalRunError(event)
       durableEventSink.emit(event)
-    }, { useWebviewApproval: true, approvalResolveRef: this.approvalResolveRef, runCommandsInTerminal: vscode.workspace.getConfiguration("nexuscode").get<boolean>("runCommandsInTerminal") ?? true, onCheckpointEntriesUpdated: () => this.postStateToWebview(), onModeChangeRequested: async (nextMode) => {
+    }, { useWebviewApproval: true, approvalResolveRef: this.approvalResolveRef, onCheckpointEntriesUpdated: () => this.postStateToWebview(), onModeChangeRequested: async (nextMode) => {
       this.mode = nextMode
       this.postStateToWebview()
     }, onWorkingDirectoryChangeRequested: async (nextCwd) => {
@@ -5005,6 +5036,7 @@ Return in this format:
       this.isRunning = false
       await this.session!.save().catch(() => {})
       this.postStateToWebview()
+      await this.sendSessionList().catch(() => {})
       if (this.session && hadPlanExit(this.session)) {
         void this.showPlanFollowup(cwd).catch(() => {})
       }

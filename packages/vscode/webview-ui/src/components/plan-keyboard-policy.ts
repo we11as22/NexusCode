@@ -1,7 +1,8 @@
 export type PlanKeyboardAction =
   | "none"
   | "submit"
-  | { select: 0 | 1 | 2 }
+  | "dismiss"
+  | { select: 0 | 1 }
 
 export interface PlanKeyboardInput {
   readonly key: string
@@ -28,9 +29,9 @@ export function planKeyboardAction(
     if (nativeButton || !input.canSubmit) return "none"
     return "submit"
   }
+  if (input.key === "Escape" && !editing) return "dismiss"
   if (editing || nativeButton) return "none"
   if (input.key === "1") return { select: 0 }
   if (input.key === "2") return { select: 1 }
-  if (input.key === "3") return { select: 2 }
   return "none"
 }

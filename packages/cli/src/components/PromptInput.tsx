@@ -501,7 +501,7 @@ function PromptInput({
     if (virtualCmdMatch) {
       const vcName = virtualCmdMatch[1]!.toLowerCase()
       const vcArg = (virtualCmdMatch[2] ?? '').trim()
-      const VALID_MODES = ['agent', 'plan', 'ask', 'debug', 'review']
+      const VALID_MODES = ['agent', 'plan', 'ask', 'debug']
 
       switch (vcName) {
         case 'mode': {
