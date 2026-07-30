@@ -21,7 +21,7 @@ func TestWFPABIStructSizes(t *testing.T) {
 		{name: "FWPM_PROVIDER0", got: unsafe.Sizeof(fwpmProvider0{}), want: 64},
 		{name: "FWPM_SUBLAYER0", got: unsafe.Sizeof(fwpmSubLayer0{}), want: 72},
 		{name: "FWPM_FILTER_CONDITION0", got: unsafe.Sizeof(fwpmFilterCondition0{}), want: 40},
-		{name: "FWPM_ACTION0", got: unsafe.Sizeof(fwpmAction0{}), want: 24},
+		{name: "FWPM_ACTION0", got: unsafe.Sizeof(fwpmAction0{}), want: 20},
 		{name: "FWPM_FILTER0", got: unsafe.Sizeof(fwpmFilter0{}), want: 200},
 	}
 	for _, test := range tests {
