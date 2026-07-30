@@ -49,6 +49,16 @@ const powershell = path.join(
 if (!fs.existsSync(powershell)) {
   throw new Error(`PowerShell 7 runtime not found: ${powershell}`)
 }
+const windowsPowerShell = path.join(
+  systemRoot,
+  "System32",
+  "WindowsPowerShell",
+  "v1.0",
+  "powershell.exe",
+)
+if (!fs.existsSync(windowsPowerShell)) {
+  throw new Error(`Windows PowerShell runtime not found: ${windowsPowerShell}`)
+}
 
 function request(
   argv,
@@ -201,6 +211,31 @@ try {
   ) {
     throw new Error(
       `PowerShell workspace flow failed: ${JSON.stringify(powershellWrite)}`,
+    )
+  }
+
+  const windowsPowerShellWrite = runSandbox(
+    request(
+      [
+        windowsPowerShell,
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "[IO.File]::WriteAllText((Join-Path (Get-Location) 'windows-powershell-ok.txt'),'windows-powershell-ok')",
+      ],
+      { timeoutMillis: 60_000 },
+    ),
+  )
+  if (
+    windowsPowerShellWrite.status !== 0 ||
+    fs.readFileSync(
+      path.join(workspace, "windows-powershell-ok.txt"),
+      "utf8",
+    ) !== "windows-powershell-ok"
+  ) {
+    throw new Error(
+      `Windows PowerShell workspace flow failed: ${JSON.stringify(windowsPowerShellWrite)}`,
     )
   }
 
