@@ -36,7 +36,11 @@ parent-death signal.
 | macOS arm64 | Seatbelt через фиксированный `/usr/bin/sandbox-exec` | Проверен end-to-end на текущем Mac: запись в workspace разрешена; запись вне workspace и в защищённые `.git/.nexus/.agents/.codex` запрещена; политика наследуется дочерним shell; сеть по умолчанию закрыта; явное сетевое и Unix-socket разрешение работает |
 | macOS x64 | Seatbelt | Код и cross-build готовы; реальный x64 host в этом чекпоинте не использовался |
 | Linux arm64/x64 | bundled Bubblewrap 0.11.2, seccomp, namespaces | Оба статических ELF cross-build проходят; TypeScript policy/protocol покрыты тестами. Реальный Linux host ещё не прогнан, поэтому production parity не заявляется |
-| Windows arm64/x64 | отдельные offline/online identities, capability ACL, restricted token, private desktop, handle allow-list, Job Object, user-scoped Windows Firewall | Backend реализован и PE helper cross-build проходит для обеих архитектур. Windows 2022 workflow содержит setup/check и безопасный smoke workspace/outside write, write→read-only, protected/denied roots, offline/online network и kill всего process tree. Реальный результат workflow ещё нужен; скрытого unsandboxed fallback нет |
+| Windows x64 | отдельные offline/online identities, capability ACL, restricted token, private desktop, handle allow-list, Job Object, Windows Firewall + прямые WFP-фильтры | Проверен на реальном Windows Server 2022: setup, audit и restricted self-probe зелёные; cmd/PowerShell 7/Windows PowerShell 5.1 работают; workspace/outside write, write→read-only, protected/denied roots, offline/online loopback и kill всего process tree доказаны |
+| Windows arm64 | тот же native backend | PE helper cross-build/vet и SHA-256 packaging проходят; реальный arm64 host ещё не использовался |
+
+Windows x64:
+[зелёный Native sandbox run 30558346395](https://github.com/we11as22/NexusCode/actions/runs/30558346395).
 
 ## Интеграция UI
 
@@ -70,7 +74,7 @@ NexusCode.
 - webview: 84/84;
 - state: 119/119;
 - sandbox: 41/41;
-- runtime/installer/storage: 13/13;
+- runtime/installer/storage: 15/15;
 - typecheck: все семь исполняемых workspace-пакетов;
 - deterministic feature census: 247 функций, проверка актуальности прошла;
 - MCP/skills workflow: OK;
@@ -85,13 +89,13 @@ NexusCode.
 ## Что ещё нельзя назвать готовым паритетом
 
 1. Нужен реальный Linux host E2E, хотя policy, протокол и cross-build зелёные.
-2. Нужен зелёный прогон добавленного workflow на настоящем Windows runner.
-   Реализация backend и smoke suite готовы, но macOS cross-build не является
-   доказательством Windows runtime.
+2. Windows x64 runtime проверен, но arm64 пока доказан только cross-build/vet;
+   для полного архитектурного паритета нужен настоящий Windows arm64 runner.
 3. Доверенный JavaScript plugin worker изолирован процессом и capability
    проверками, однако ещё не помещён в отдельный kernel sandbox с полностью
    декларативным ABI.
 
-Поэтому на текущем macOS можно утверждать end-to-end готовность sandbox broker
-для CLI, VS Code и server. Утверждать идентичный runtime-паритет на всех ОС до
-Linux/Windows host-проверок нельзя.
+Поэтому можно утверждать end-to-end готовность общего sandbox broker для CLI,
+VS Code и server на macOS arm64 и Windows x64. Полный runtime-паритет всех
+архитектур остаётся недоказанным до Linux host E2E, macOS x64 и Windows arm64
+host-проверок.

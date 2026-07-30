@@ -63,7 +63,7 @@ loaded. From the repository root:
 On macOS, `install.command` can also be launched with a double click. On
 Windows, `install.cmd` performs the same build and installation and shows one
 UAC confirmation while it provisions the two private sandbox identities and
-their offline firewall policy.
+their fail-closed offline Firewall/WFP policy.
 
 That one action incrementally installs dependencies, builds the shared core,
 CLI and extension, bundles and verifies the current-platform OS sandbox and
@@ -78,7 +78,9 @@ store.
 | --- | --- | --- |
 | macOS arm64/x64 | Seatbelt via the fixed `/usr/bin/sandbox-exec` path | arm64 is built, packaged, and exercised on a real host: workspace writes succeed; writes outside the workspace and to protected runtime metadata are denied; restricted network and Unix-socket rules are enforced |
 | Linux arm64/x64 | bundled Bubblewrap plus seccomp and process hardening | both architectures cross-build successfully and the policy/protocol layers are covered by tests; a real Linux host run is still required before claiming production parity |
-| Windows arm64/x64 | dedicated offline/online identities, capability ACLs, restricted primary token, private desktop, explicit handle list, nested kill-on-close Job Objects, user-scoped Windows Firewall policy | implementation and PE cross-build are complete for x64/arm64; a Windows 2022 CI smoke suite exercises workspace/outside writes, write→read-only authority, protected/denied roots, offline/online networking and process-tree termination. A real Windows run must pass before runtime parity is claimed |
+| Windows arm64/x64 | dedicated offline/online identities, capability ACLs, restricted primary token, private desktop, explicit handle list, nested kill-on-close Job Objects, user-scoped Windows Firewall plus persistent direct WFP filters | x64 is exercised on a real Windows Server 2022 host: setup/audit/self-probe pass, cmd/PowerShell 7/Windows PowerShell 5.1 run inside the boundary, workspace writes succeed, outside/protected/denied access is rejected, write authority cannot leak into a read-only turn, offline loopback is blocked while online loopback works, and timeout kills the whole process tree. arm64 is cross-built and packaged but still needs an arm64 host run |
+
+Windows x64 evidence: [Native sandbox run 30558346395](https://github.com/we11as22/NexusCode/actions/runs/30558346395).
 
 CLI, server, background commands, plugin hooks, and the VS Code host all use
 the same Nexus-owned broker contract. An ordinary command approval authorizes

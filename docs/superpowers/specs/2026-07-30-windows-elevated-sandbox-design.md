@@ -1,7 +1,7 @@
 # Windows elevated sandbox для NexusCode
 
 Дата: 2026-07-30
-Статус: реализовано; Windows-host smoke выполняется CI
+Статус: реализовано и проверено на Windows Server 2022 x64; arm64 cross-built
 
 ## Цель
 
@@ -24,10 +24,13 @@ NexusCode остаётся самостоятельным продуктом: и
    SID только активных файловых полномочий текущего запроса.
 3. ACL выдаются стабильным capability SID для канонического workspace/root.
    Старый workspace-capability не попадает в токен нового запуска.
-4. Offline identity блокируется user-scoped исходящей политикой Windows
-   Firewall (поверх WFP). Setup и `--check` проверяют работу MpsSvc, включённые
-   профили, разрешение локальных правил, точные rule names, action/direction и
-   SID. Online identity используется только при `network: "enabled"`.
+4. Offline identity блокируется двумя независимыми persistent-слоями:
+   user-scoped Windows Firewall rules и прямыми WFP block-фильтрами на
+   `ALE_AUTH_CONNECT`/`ALE_RESOURCE_ASSIGNMENT` для IPv4/IPv6. Setup и
+   `--audit` проверяют MpsSvc, включённые профили, разрешение локальных правил,
+   точные rule names/action/direction/SID, а также provider, sublayer, filter
+   shape и целевой offline SID. Online identity используется только при
+   `network: "enabled"`.
 5. Процесс входит в Job Object атомарно через
    `PROC_THREAD_ATTRIBUTE_JOB_LIST`; job закрывает всё дерево при завершении
    broker, отмене или таймауте.
@@ -67,11 +70,14 @@ Setup создаёт или обновляет две локальные учё�
 атомарно пишет marker с `setupVersion`.
 
 Для offline SID создаётся fail-closed набор persistent Windows Firewall rules:
-общий outbound guard и явные non-loopback/loopback TCP/UDP блокировки. Это
-основная user-scoped firewall-модель Codex. Дополнительные прямые FWPM-фильтры
-Codex для DNS/SMB/ICMP являются необязательной defense-in-depth надстройкой и в
-этой реализации не выдаются за существующие. Частично применённый setup
-невалиден; повторный setup идемпотентно ремонтирует identities и policy.
+общий outbound guard и явные non-loopback/loopback TCP/UDP блокировки. Поскольку
+Windows Firewall на Windows Server не гарантировал блокировку loopback для
+локальной identity, setup также транзакционно устанавливает Nexus-owned WFP
+provider/sublayer и четыре user-scoped block-фильтра: connect и resource
+assignment для IPv4/IPv6. Ревизия network policy входит в setup marker, поэтому
+старое состояние автоматически определяется как `stale`. Частично применённый
+setup невалиден; повторный setup идемпотентно ремонтирует identities и оба слоя
+policy.
 
 ### Filesystem
 
@@ -125,14 +131,19 @@ Release job публикует `nexus-sandbox.exe` и SHA-256 manifest. Уста
 
 Platform-neutral тесты проверяют protocol, canonical root/capability mapping,
 setup-marker migration, command-line quoting и fail-closed state machine.
-Текущий Windows smoke suite проверяет разрешённую workspace-запись, запрет
-outside write, переход workspace-write→read-only без наследования старого
-write capability, запрещённую запись в `.git`, явный deny-read root,
-раздельные offline/online identities на локальном HTTP-сервере и уничтожение
-grandchild по timeout через Job Object. Platform-neutral tests отдельно
-проверяют строгий marker, stale capability, protocol и начало `started` только
-после реального native spawn. Повреждённые DPAPI credentials остаются
-следующим Windows-host negative test и не считаются уже доказанными.
+Windows Server 2022 x64 smoke проверяет разрешённую workspace-запись через
+`cmd.exe`, PowerShell 7 и Windows PowerShell 5.1, запрет outside write, переход
+workspace-write→read-only без наследования старого write capability,
+запрещённую запись в `.git`, явный deny-read root, раздельные offline/online
+identities на локальном HTTP-сервере, блокировку loopback прямыми WFP-фильтрами
+и уничтожение grandchild по timeout через Job Object. Platform-neutral tests
+отдельно проверяют строгий marker, stale capability, protocol и начало
+`started` только после реального native spawn. Повреждённые DPAPI credentials
+остаются следующим Windows-host negative test и не считаются уже доказанными.
 
-До прохождения smoke suite на реальных Windows x64 и arm64 документация может
-утверждать только «реализовано и cross-built», но не runtime parity.
+x64 runtime boundary доказан CI. Windows arm64 helper имеет те же исходники,
+проходит cross-build/vet и поставляется с SHA-256 manifest, но runtime parity
+arm64 не заявляется до появления настоящего arm64 runner.
+
+Доказательство x64:
+[Native sandbox run 30558346395](https://github.com/we11as22/NexusCode/actions/runs/30558346395).
