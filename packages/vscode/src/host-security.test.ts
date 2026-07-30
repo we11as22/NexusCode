@@ -104,14 +104,16 @@ describe("VS Code host workspace authority wiring", () => {
 })
 
 describe("VS Code webview lifecycle wiring", () => {
-  it("restores editor panels after an IDE window reload", () => {
+  it("keeps a single sidebar chat surface and retires legacy editor panels", () => {
     expect(extensionSource).toContain(
       'registerWebviewPanelSerializer("nexuscode.panel"',
     )
-    expect(extensionSource).toContain("provider?.restorePanel(webviewPanel)")
-    expect(providerSource).toContain(
-      "async restorePanel(panel: vscode.WebviewPanel)",
+    expect(extensionSource).toContain("webviewPanel.dispose()")
+    expect(extensionSource).toContain(
+      'executeCommand("workbench.view.extension.nexuscode-activitybar")',
     )
-    expect(providerSource).toContain("this.attachPanel(panel)")
+    expect(providerSource).not.toContain("createWebviewPanel")
+    expect(providerSource).not.toContain("restorePanel")
+    expect(providerSource).not.toContain("private panel")
   })
 })

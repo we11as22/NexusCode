@@ -58,7 +58,7 @@
     "commands": [
       {
         "command": "nexuscode.openPanel",
-        "title": "Open NexusCode Panel",
+        "title": "Open NexusCode",
         "category": "NexusCode",
         "icon": "$(robot)"
       },

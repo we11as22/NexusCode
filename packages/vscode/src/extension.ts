@@ -21,7 +21,10 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
     vscode.window.registerWebviewPanelSerializer("nexuscode.panel", {
       async deserializeWebviewPanel(webviewPanel) {
-        await provider?.restorePanel(webviewPanel)
+        // Versions before 0.1.0 could persist a second, editor-hosted copy of
+        // the chat. Retire it on restore so one controller has one UI surface.
+        webviewPanel.dispose()
+        await vscode.commands.executeCommand("workbench.view.extension.nexuscode-activitybar")
       },
     }),
   )
@@ -33,7 +36,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand("nexuscode.openPanel", async () => {
-      await provider?.openPanel()
+      await vscode.commands.executeCommand("workbench.view.extension.nexuscode-activitybar")
     }),
 
     vscode.commands.registerCommand("nexuscode.sidebar.focus", () => {

@@ -35,7 +35,6 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
   public static readonly viewType = "nexuscode.sidebar"
   private static readonly DEBUG_FILE_LOG_ENABLED = process.env.NEXUSCODE_DEBUG_FILE_LOG === "1"
   private view?: vscode.WebviewView
-  private panel?: vscode.WebviewPanel
   private controller: Controller
   private disposables: vscode.Disposable[] = []
   private readonly output = vscode.window.createOutputChannel("NexusCode")
@@ -74,44 +73,6 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
       if (webviewView.visible) {
         this.controller.postStateToWebview(true)
         this.sendIndexStatus()
-      }
-    }, null, this.disposables)
-  }
-
-  async openPanel(): Promise<void> {
-    this.debugLog("openPanel")
-    if (this.panel) {
-      this.panel.reveal(vscode.ViewColumn.Beside)
-      return
-    }
-
-    const panel = vscode.window.createWebviewPanel(
-      "nexuscode.panel",
-      "NexusCode",
-      vscode.ViewColumn.Beside,
-      {
-        enableScripts: true,
-        retainContextWhenHidden: true,
-        localResourceRoots: [this.context.extensionUri],
-      }
-    )
-    this.attachPanel(panel)
-  }
-
-  async restorePanel(panel: vscode.WebviewPanel): Promise<void> {
-    this.debugLog("restorePanel")
-    this.panel?.dispose()
-    this.attachPanel(panel)
-  }
-
-  private attachPanel(panel: vscode.WebviewPanel): void {
-    this.panel = panel
-    this.setupWebview(panel.webview)
-    void this.controller.ensureInitialized()
-
-    panel.onDidDispose(() => {
-      if (this.panel === panel) {
-        this.panel = undefined
       }
     }, null, this.disposables)
   }
@@ -345,7 +306,6 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
     this.rememberLatestMessage(stamped)
     const targets: vscode.Webview[] = []
     if (this.view?.webview) targets.push(this.view.webview)
-    if (this.panel?.webview && this.panel.webview !== this.view?.webview) targets.push(this.panel.webview)
     for (const webview of targets) {
       void this.postMessageToTarget(webview, stamped)
     }
@@ -538,8 +498,6 @@ export class NexusProvider implements vscode.WebviewViewProvider, vscode.Disposa
   dispose(): void {
     setIndexTelemetrySink(undefined)
     this.controller.dispose()
-    this.panel?.dispose()
-    this.panel = undefined
     for (const d of this.disposables) {
       d.dispose()
     }
