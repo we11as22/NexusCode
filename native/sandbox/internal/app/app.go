@@ -22,21 +22,21 @@ func Run(
 ) int {
 	data, err := io.ReadAll(io.LimitReader(input, protocol.MaxRequestBytes+1))
 	if err != nil {
-		writeError(control, "", "request_read_failed", err)
+		writeError(stderr, control, "", "request_read_failed", err)
 		return 125
 	}
 	if len(data) > protocol.MaxRequestBytes {
-		writeError(control, "", "invalid_request", fmt.Errorf("request exceeds %d bytes", protocol.MaxRequestBytes))
+		writeError(stderr, control, "", "invalid_request", fmt.Errorf("request exceeds %d bytes", protocol.MaxRequestBytes))
 		return 125
 	}
 	request, err := protocol.DecodeRequest(data)
 	if err != nil {
-		writeError(control, "", "invalid_request", err)
+		writeError(stderr, control, "", "invalid_request", err)
 		return 125
 	}
 	command, err := build(request)
 	if err != nil {
-		writeError(control, request.ExecutionID, "sandbox_setup_failed", err)
+		writeError(stderr, control, request.ExecutionID, "sandbox_setup_failed", err)
 		return 125
 	}
 	result := runner.Run(ctx, request, command, stdout, stderr, control)
@@ -49,15 +49,17 @@ func Run(
 	return result.ExitCode
 }
 
-func writeError(control io.Writer, executionID, code string, err error) {
-	if control == nil {
-		return
+func writeError(stderr, control io.Writer, executionID, code string, err error) {
+	if stderr != nil {
+		_, _ = fmt.Fprintf(stderr, "nexus-sandbox: %v\n", err)
 	}
-	_ = json.NewEncoder(control).Encode(protocol.ControlMessage{
-		Version:     protocol.ProtocolVersion,
-		Type:        protocol.ControlError,
-		ExecutionID: executionID,
-		ErrorCode:   code,
-		Message:     err.Error(),
-	})
+	if control != nil {
+		_ = json.NewEncoder(control).Encode(protocol.ControlMessage{
+			Version:     protocol.ProtocolVersion,
+			Type:        protocol.ControlError,
+			ExecutionID: executionID,
+			ErrorCode:   code,
+			Message:     err.Error(),
+		})
+	}
 }

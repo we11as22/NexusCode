@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -72,6 +73,9 @@ func Run(
 
 	process, err := startProcess(ctx, request, command, stdout, stderr)
 	if err != nil {
+		if stderr != nil {
+			_, _ = fmt.Fprintf(stderr, "nexus-sandbox: %v\n", err)
+		}
 		writeControl(control, protocol.ControlMessage{
 			Version: protocol.ProtocolVersion, Type: protocol.ControlError,
 			ExecutionID: request.ExecutionID, Sandbox: command.Sandbox,

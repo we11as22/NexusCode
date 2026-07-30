@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -69,6 +70,7 @@ func TestRunDoesNotReportStartedWhenNativeSandboxSpawnFails(t *testing.T) {
 	// Keep cwd covered while retaining independently hand-built request data.
 	request.ReadableRoots = []string{request.Cwd}
 	var control bytes.Buffer
+	var stderr bytes.Buffer
 	result := Run(
 		context.Background(),
 		request,
@@ -84,7 +86,7 @@ func TestRunDoesNotReportStartedWhenNativeSandboxSpawnFails(t *testing.T) {
 			},
 		},
 		io.Discard,
-		io.Discard,
+		&stderr,
 		&control,
 	)
 	if result.SetupError == nil {
@@ -99,6 +101,9 @@ func TestRunDoesNotReportStartedWhenNativeSandboxSpawnFails(t *testing.T) {
 	}
 	if bytes.Contains(control.Bytes(), []byte(`"type":"started"`)) {
 		t.Fatalf("started was emitted before native spawn succeeded: %s", control.Bytes())
+	}
+	if !strings.Contains(stderr.String(), "CreateProcessAsUserW denied") {
+		t.Fatalf("stderr omitted native spawn failure: %q", stderr.String())
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"runtime"
 	"testing"
 
@@ -35,6 +36,39 @@ func TestRunRejectsOversizedOrMalformedInputWithoutSpawning(t *testing.T) {
 	}
 	if message.Type != protocol.ControlError || message.ErrorCode != "invalid_request" {
 		t.Fatalf("message = %#v", message)
+	}
+}
+
+func TestRunMirrorsSetupFailureToStderrWhenControlTransportIsUnavailable(t *testing.T) {
+	request := protocol.Request{
+		Version:       protocol.ProtocolVersion,
+		ExecutionID:   "setup-diagnostic",
+		Argv:          []string{"ignored"},
+		Cwd:           t.TempDir(),
+		ReadableRoots: []string{t.TempDir()},
+		Network:       protocol.NetworkRestricted,
+	}
+	request.ReadableRoots = []string{request.Cwd}
+	encoded, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	exitCode := Run(
+		context.Background(),
+		bytes.NewReader(encoded),
+		&bytes.Buffer{},
+		&stderr,
+		nil,
+		func(protocol.Request) (runner.Command, error) {
+			return runner.Command{}, errors.New("native authority unavailable")
+		},
+	)
+	if exitCode != 125 {
+		t.Fatalf("exit = %d", exitCode)
+	}
+	if got := stderr.String(); got != "nexus-sandbox: native authority unavailable\n" {
+		t.Fatalf("stderr = %q", got)
 	}
 }
 
