@@ -1,7 +1,7 @@
 import * as path from 'node:path'
 import * as fs from 'node:fs'
 import { spawnSync } from 'node:child_process'
-import { Box, Newline, Text } from 'ink'
+import { Box, Newline, Static, Text } from 'ink'
 import ProjectOnboarding, {
   markProjectOnboardingComplete,
 } from '../ProjectOnboarding.js'
@@ -108,6 +108,7 @@ import { cycleRuntimeMode } from '../session-selection.js'
 import {
   Session,
   hadPlanExit,
+  resolvePlanFollowup,
   getPlanContentForFollowup,
   getSessionModeForResume,
   formatQuestionnaireAnswersForAgent,
@@ -139,6 +140,8 @@ import {
 } from './prompt-visibility.js'
 import {
   computeCliRenderWindowStart,
+  partitionCliRenderItems,
+  shouldKeepLatestAssistantMessageLive,
   type CliRenderWindowAnchor,
 } from '../cli-render-window.js'
 import { removePermissionRequest } from '../permission-queue.js'
@@ -345,6 +348,11 @@ export function REPL({
   )
   /** Bumps on terminal resize only — remount header without changing conversation log fork. */
   const [layoutRemountKey, setLayoutRemountKey] = useState(0)
+  /**
+   * Completed rows live in Ink <Static>. A user-requested Ctrl+O presentation
+   * change intentionally redraws the transcript once with a fresh static root.
+   */
+  const [transcriptRenderEpoch, setTranscriptRenderEpoch] = useState(0)
   const lastTerminalSizeRef = useRef({
     columns: process.stdout.columns || 80,
     rows: process.stdout.rows || 24,
@@ -1002,6 +1010,10 @@ export function REPL({
       saveGlobalConfig({ ...cfg, showToolOutputs: next, showToolDetails: next })
       return next
     })
+    // Static scrollback is immutable by design. Clear and remount only for this
+    // explicit user action so settled rows expand/collapse without duplicates.
+    void clearTerminal()
+    setTranscriptRenderEpoch(epoch => epoch + 1)
   }, [])
 
   const runNexusFollowupPrompt = useCallback(
@@ -1804,6 +1816,9 @@ export function REPL({
     const timeline = nexusBootstrap
       ? buildChatTimeline(ordered)
       : ordered.map((m) => ({ kind: 'message' as const, message: m }))
+    const latestAssistantMessageKey =
+      [...ordered].reverse().find((message) => message.type === 'assistant')
+        ?.uuid ?? null
 
     return timeline
       .map((piece): MessageRenderItem | null => {
@@ -1923,12 +1938,21 @@ export function REPL({
             />
           )
 
-        const type = shouldRenderStatically(
-          _,
-          normalizedMessages,
-          unresolvedToolUseIDs,
-          subagentsByPartId,
-        )
+        const latestAssistantDraftIsLive =
+          _.type === 'assistant' &&
+          shouldKeepLatestAssistantMessageLive(
+            isLoading,
+            _.uuid,
+            latestAssistantMessageKey,
+          )
+        const type = latestAssistantDraftIsLive
+          ? 'transient'
+          : shouldRenderStatically(
+              _,
+              normalizedMessages,
+              unresolvedToolUseIDs,
+              subagentsByPartId,
+            )
           ? 'static'
           : 'transient'
 
@@ -1967,6 +1991,7 @@ export function REPL({
     toolJSX,
     toolUseConfirm,
     isMessageSelectorVisible,
+    isLoading,
     unresolvedToolUseIDs,
     mcpStatuses,
     isDefaultModel,
@@ -1981,29 +2006,69 @@ export function REPL({
   const shouldHideNexusHeader =
     nexusBootstrap != null && inputValue.trimStart().startsWith('/')
 
-  const renderWindowAnchorRef = useRef<CliRenderWindowAnchor>(null)
-  const renderWindowStart = computeCliRenderWindowStart(
-    messagesJSX.map((item) => item.key),
-    renderWindowAnchorRef,
+  const { staticPrefix, liveSuffix } = useMemo(
+    () => partitionCliRenderItems(messagesJSX),
+    [messagesJSX],
   )
-  const visibleMessagesJSX = useMemo(
+  const liveRenderWindowAnchorRef = useRef<CliRenderWindowAnchor>(null)
+  const liveRenderWindowStart = computeCliRenderWindowStart(
+    liveSuffix.map((item) => item.key),
+    liveRenderWindowAnchorRef,
+  )
+  const visibleLiveSuffix = useMemo(
     () =>
-      renderWindowStart > 0
-        ? messagesJSX.slice(renderWindowStart)
-        : messagesJSX,
-    [messagesJSX, renderWindowStart],
+      liveRenderWindowStart > 0
+        ? liveSuffix.slice(liveRenderWindowStart)
+        : liveSuffix,
+    [liveSuffix, liveRenderWindowStart],
+  )
+  const headerCommittedToScrollback = staticPrefix.length > 0
+  const staticTranscriptItems = useMemo<MessageRenderItem[]>(
+    () =>
+      headerCommittedToScrollback
+        ? [
+            {
+              key: 'nexus-welcome',
+              type: 'static',
+              jsx: (
+                <Box flexDirection="column">
+                  <Logo
+                    mcpStatuses={mcpStatuses}
+                    isDefaultModel={isDefaultModel}
+                  />
+                  <ProjectOnboarding workspaceDir={getOriginalCwd()} />
+                </Box>
+              ),
+            },
+            ...staticPrefix,
+          ]
+        : [],
+    [
+      headerCommittedToScrollback,
+      isDefaultModel,
+      mcpStatuses,
+      staticPrefix,
+    ],
   )
 
   /**
-   * Single chronological list (no Static/transient split): splitting froze
-   * history above live rows so tool results appeared above their tool_use
-   * lines. The whole list uses OpenClaude's stable non-virtualized render
-   * window so Stock Ink does not retain an unbounded React/Yoga tree.
+   * Stock Ink clears the entire terminal whenever its live Yoga output grows
+   * taller than the viewport. Print only the contiguous completed prefix to
+   * native scrollback and keep the active suffix live. A prefix split preserves
+   * tool/result chronology; the old global static/transient split did not.
    */
   const chatMessagesSection = useMemo(
     () =>
       <>
-        {!shouldHideNexusHeader ? (
+        <Static
+          key={`nexus-static-${nexusSessionId ?? 'local'}-${forkNumber}-${transcriptRenderEpoch}`}
+          items={staticTranscriptItems}
+        >
+          {item => (
+            <React.Fragment key={item.key}>{item.jsx}</React.Fragment>
+          )}
+        </Static>
+        {!headerCommittedToScrollback && !shouldHideNexusHeader ? (
           <Box
             key={`nexus-header-${forkNumber}-${layoutRemountKey}`}
             flexDirection="column"
@@ -2015,7 +2080,7 @@ export function REPL({
             <ProjectOnboarding workspaceDir={getOriginalCwd()} />
           </Box>
         ) : null}
-        {renderWindowStart > 0 ? (
+        {!isLoading && liveRenderWindowStart > 0 ? (
           <Box marginY={1}>
             <Text dimColor>
               Earlier activity remains in the saved session and terminal
@@ -2023,18 +2088,23 @@ export function REPL({
             </Text>
           </Box>
         ) : null}
-        {visibleMessagesJSX.map(item => (
+        {visibleLiveSuffix.map(item => (
           <React.Fragment key={item.key}>{item.jsx}</React.Fragment>
         ))}
       </>,
     [
       forkNumber,
+      headerCommittedToScrollback,
       layoutRemountKey,
       mcpStatuses,
       isDefaultModel,
-      renderWindowStart,
+      isLoading,
+      liveRenderWindowStart,
+      nexusSessionId,
       shouldHideNexusHeader,
-      visibleMessagesJSX,
+      staticTranscriptItems,
+      transcriptRenderEpoch,
+      visibleLiveSuffix,
     ],
   )
 
@@ -2111,6 +2181,7 @@ export function REPL({
                 <NexusTodoBlock todo={nexusTodo} />
               ) : null}
               <NexusApprovalPanel
+                key={nexusApprovalAction.partId}
                 action={nexusApprovalAction.action}
                 partId={nexusApprovalAction.partId}
                 approvalRef={tuiApprovalRef}
@@ -2166,16 +2237,25 @@ export function REPL({
                   planText={nexusPlanFollowup.planText}
                   onImplement={async () => {
                     const planText = nexusPlanFollowup.planText
-                    nexusBootstrap.session.updateTodo(approvedPlanTodo(planText))
-                    nexusBootstrap.session.setMode('agent')
-                    nexusBootstrap.mode = 'agent'
+                    const todo = approvedPlanTodo(planText)
                     if (nexusBootstrap.remoteClient) {
                       await nexusBootstrap.remoteClient.setSessionMode(
                         nexusBootstrap.session.id,
                         'agent',
-                        { todo: nexusBootstrap.session.getTodo() },
+                        {
+                          todo,
+                          planFollowupResolution: 'implemented',
+                        },
                       )
-                    } else {
+                    }
+                    resolvePlanFollowup(
+                      nexusBootstrap.session,
+                      'implemented',
+                    )
+                    nexusBootstrap.session.updateTodo(todo)
+                    nexusBootstrap.session.setMode('agent')
+                    nexusBootstrap.mode = 'agent'
+                    if (!nexusBootstrap.remoteClient) {
                       await nexusBootstrap.session.save()
                     }
                     setNexusTodo(nexusBootstrap.session.getTodo())
@@ -2189,6 +2269,23 @@ export function REPL({
                   }}
                   onRevise={async (instruction) => {
                     const planText = nexusPlanFollowup.planText
+                    if (nexusBootstrap.remoteClient) {
+                      await nexusBootstrap.remoteClient.setSessionMode(
+                        nexusBootstrap.session.id,
+                        'plan',
+                        {
+                          todo: nexusBootstrap.session.getTodo(),
+                          planFollowupResolution: 'revised',
+                        },
+                      )
+                    }
+                    resolvePlanFollowup(
+                      nexusBootstrap.session,
+                      'revised',
+                    )
+                    if (!nexusBootstrap.remoteClient) {
+                      await nexusBootstrap.session.save()
+                    }
                     setNexusPlanFollowup(null)
                     await runNexusFollowupPrompt(
                       `Revise the current implementation plan based on this feedback.\n\nCurrent plan:\n${planText}\n\nUser feedback / requested changes:\n${instruction}\n\nDo not implement the code. Update the plan file in .nexus/plans/ and call PlanExit again when the revised plan is ready.`,
@@ -2204,19 +2301,27 @@ export function REPL({
                       storedReturnMode === 'review'
                         ? 'agent'
                         : (storedReturnMode ?? 'agent')
-                    nexusBootstrap.session.setMode(returnMode)
-                    nexusBootstrap.mode = returnMode
-                    setNexusPlanFollowup(null)
-                    setNexusModeOverride(returnMode)
                     if (nexusBootstrap.remoteClient) {
                       await nexusBootstrap.remoteClient.setSessionMode(
                         nexusBootstrap.session.id,
                         returnMode,
-                        { todo: nexusBootstrap.session.getTodo() },
+                        {
+                          todo: nexusBootstrap.session.getTodo(),
+                          planFollowupResolution: 'abandoned',
+                        },
                       )
-                    } else {
+                    }
+                    resolvePlanFollowup(
+                      nexusBootstrap.session,
+                      'abandoned',
+                    )
+                    nexusBootstrap.session.setMode(returnMode)
+                    nexusBootstrap.mode = returnMode
+                    if (!nexusBootstrap.remoteClient) {
                       await nexusBootstrap.session.save()
                     }
+                    setNexusPlanFollowup(null)
+                    setNexusModeOverride(returnMode)
                   }}
                 />
               ) : null}
@@ -2360,26 +2465,10 @@ function shouldRenderStatically(
   switch (message.type) {
     case 'user':
     case 'assistant': {
-      // Tool rows depend on Ctrl+O (expandToolDetails). Static freezes them so
-      // collapse/expand stops updating after the turn completes.
-      if (message.type === 'assistant') {
-        const blocks = message.message.content
-        if (
-          Array.isArray(blocks) &&
-          blocks.some(b => b?.type === 'tool_use')
-        ) {
-          return false
-        }
-      }
-      // Keep tool results in the same transient region as assistant tool_use rows. Otherwise
-      // Static(history) renders before transient(live), and outputs appear above tool lines.
-      if (
-        message.type === 'user' &&
-        Array.isArray(message.message.content) &&
-        message.message.content.some(b => b?.type === 'tool_result')
-      ) {
-        return false
-      }
+      // Completed tool and result rows may be frozen now that Static receives
+      // only a chronological prefix. Ctrl+O performs a deliberate full
+      // transcript remount, so historical details still expand without the
+      // duplicate/reordered output caused by the old global split.
       const toolUseID = getToolUseID(message)
       if (!toolUseID) {
         return true

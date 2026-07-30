@@ -55,12 +55,12 @@ function isDeniedFileEdit(part: ToolPart): boolean {
  * Layout:
  *   ─────────────────────────────────────
  *   ⚠  Run: echo 'test'          +3 -1
- *   [✓ Allow] [∞ Always] [⌀ Session] [✗]  [↩]
+ *   [✓ Allow once] [∞ Session] [✗ Deny] [↩]
  *   ─────────────────────────────────────
  *
  * [↩] opens "Say what to do instead" textarea.
  */
-function ApprovalInline({
+export function ApprovalInline({
   action,
   onResolve,
 }: {
@@ -76,6 +76,14 @@ function ApprovalInline({
 
   const label = approvalActionLabel(action)
   const warning = approvalActionWarning(action)
+  const sessionApprovalTitle =
+    action.type === "write"
+      ? "Allow this edit tool for this session"
+      : action.type === "execute"
+        ? "Allow this exact command for this session"
+        : action.type === "mcp"
+          ? "Allow this MCP tool for this session"
+          : "Allow this tool for this session"
 
   const submitRedirect = () => {
     const trimmed = redirectText.trim()
@@ -144,14 +152,18 @@ function ApprovalInline({
             Review Diff
           </button>
         ) : null}
-        <button type="button" className={BTN_ALLOW} onClick={() => onResolve(true)} title="Allow once">✓ Allow</button>
+        <button type="button" className={BTN_ALLOW} onClick={() => onResolve(true)} title="Allow once">✓ Allow once</button>
         {canPersistApproval && (
-          <>
-            <button type="button" className={BTN_ALLOW} onClick={() => onResolve(true, true)} title="Always allow this tool">∞ Always</button>
-            <button type="button" className={BTN_NEUTRAL} onClick={() => onResolve(true, false, undefined, true)} title="Allow all for this session">⌀ Session</button>
-          </>
+          <button
+            type="button"
+            className={BTN_NEUTRAL}
+            onClick={() => onResolve(true, true)}
+            title={sessionApprovalTitle}
+          >
+            ∞ Session
+          </button>
         )}
-        <button type="button" className={BTN_DENY} onClick={() => onResolve(false)} title="Deny">✗</button>
+        <button type="button" className={BTN_DENY} onClick={() => onResolve(false)} title="Deny">✗ Deny</button>
         {supportsScopedApproval && (
           <button type="button" className={BTN_NEUTRAL} onClick={() => setShowRedirect(true)} title="Say what to do instead">↩</button>
         )}

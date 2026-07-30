@@ -127,6 +127,29 @@ describe("CLI startup authority ordering", () => {
     )
   })
 
+  it("consumes plan handoffs before implementing, revising, or abandoning", () => {
+    const panelStart = replSource.indexOf(
+      "{nexusBootstrap && nexusPlanFollowup ?",
+    )
+    const panelEnd = replSource.indexOf(
+      "{nexusBootstrap && nexusQuestionRequest ?",
+      panelStart,
+    )
+    const panel = replSource.slice(panelStart, panelEnd)
+
+    expect(panelStart).toBeGreaterThanOrEqual(0)
+    expect(panel.match(/resolvePlanFollowup\(/g)).toHaveLength(3)
+    expect(panel).toContain("resolvePlanFollowup(\n                      nexusBootstrap.session,\n                      'implemented'")
+    expect(panel).toContain("resolvePlanFollowup(\n                      nexusBootstrap.session,\n                      'revised'")
+    expect(panel).toContain("resolvePlanFollowup(\n                      nexusBootstrap.session,\n                      'abandoned'")
+  })
+
+  it("remounts the approval surface for each exact tool request", () => {
+    expect(replSource).toContain(
+      "key={nexusApprovalAction.partId}",
+    )
+  })
+
   it("defers mode persistence until the active turn releases the session", () => {
     const effectStart = replSource.indexOf(
       "if (!nexusBootstrap || nexusSessionId == null) return",

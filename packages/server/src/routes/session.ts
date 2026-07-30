@@ -7,7 +7,11 @@ import {
   getOrchestrationRuntime,
   hashWorkspaceIdentity,
 } from "@nexuscode/core"
-import type { AgentEvent, Mode } from "@nexuscode/core"
+import type {
+  AgentEvent,
+  Mode,
+  PlanFollowupResolution,
+} from "@nexuscode/core"
 import {
   createSession as fsCreateSession,
   ensureSessionOnDisk,
@@ -108,6 +112,7 @@ sessionRoutes.patch("/:id/mode", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as {
     mode?: Mode
     todo?: unknown
+    planFollowupResolution?: unknown
   }
   const mode = body.mode
   if (mode === "review") {
@@ -130,9 +135,24 @@ sessionRoutes.patch("/:id/mode", async (c) => {
   ) {
     return c.json({ error: "Invalid todo" }, 400)
   }
+  const resolution = body.planFollowupResolution
+  if (
+    resolution !== undefined &&
+    resolution !== "implemented" &&
+    resolution !== "revised" &&
+    resolution !== "abandoned"
+  ) {
+    return c.json({ error: "Invalid plan follow-up resolution" }, 400)
+  }
   const session = await fsGetSession(id, cwd)
   if (!session) return c.json({ error: "Session not found" }, 404)
-  await fsUpdateSessionMode(id, cwd, mode, body.todo)
+  await fsUpdateSessionMode(
+    id,
+    cwd,
+    mode,
+    body.todo,
+    resolution as PlanFollowupResolution | undefined,
+  )
   const updated = await fsGetSession(id, cwd)
   return c.json({
     ok: true,

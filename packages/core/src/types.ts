@@ -765,6 +765,11 @@ export interface ToolPart {
   diffHunks?: ToolDiffLine[]
   /** Bounded snippets actually replaced by Edit, used for compact previews. */
   appliedReplacements?: AppliedReplacement[]
+  /**
+   * Host decision that consumed a completed PlanExit handoff.
+   * A revision produces a new PlanExit instead of reviving this old decision.
+   */
+  planFollowupResolution?: "implemented" | "revised" | "abandoned"
   /** Durable ownership for an exact file-change proposal and its review state. */
   changeSetId?: string
   proposalHash?: string

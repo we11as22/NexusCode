@@ -8,6 +8,10 @@ import React, { useState } from 'react'
 import { useTerminalSize } from '../hooks/useTerminalSize.js'
 import { getTheme } from '../utils/theme.js'
 import type { ApprovalAction, PermissionResult } from '@nexuscode/core'
+import {
+  computeApprovalDiffLineLimit,
+  truncateToDisplayWidth,
+} from './approval-panel-layout.js'
 
 const SEPARATOR_CHAR = '─'
 
@@ -97,16 +101,18 @@ const EXECUTE_OPTIONS_BASE: Array<{
         ? { approved: true, addToAllowedPattern: deriveAllowPattern(a.content.trim().replace(/\s+/g, ' '))! }
         : { approved: true },
   },
-  { label: 'No', result: () => ({ approved: false }) },
-  { label: 'Always allow', result: () => ({ approved: true, alwaysApprove: true }) },
-  { label: 'Allow all (session)', result: () => ({ approved: true, skipAll: true }) },
   {
-    label: 'Add to allowed',
+    label: 'Yes, allow this exact command for this session',
+    result: () => ({ approved: true, alwaysApprove: true }),
+  },
+  {
+    label: 'Yes, always allow this exact command in this project',
     result: (a) =>
       a.type === 'execute' && a.content
         ? { approved: true, addToAllowedCommand: a.content.trim().replace(/\s+/g, ' ') }
         : { approved: true },
   },
+  { label: 'No', result: () => ({ approved: false }) },
   { label: 'Say what to do instead', result: () => ({ approved: false, whatToDoInstead: '__instruct__' }) },
 ]
 
@@ -142,11 +148,29 @@ const OTHER_OPTIONS: Array<{
   result: (action: ApprovalAction) => PermissionResult
 }> = [
   { label: 'Yes', result: () => ({ approved: true }) },
+  {
+    label: 'Yes, allow this tool for this session',
+    result: () => ({ approved: true, alwaysApprove: true }),
+  },
   { label: 'No', result: () => ({ approved: false }) },
-  { label: 'Always allow', result: () => ({ approved: true, alwaysApprove: true }) },
-  { label: 'Allow all (session)', result: () => ({ approved: true, skipAll: true }) },
   { label: 'Say what to do instead', result: () => ({ approved: false, whatToDoInstead: '__instruct__' }) },
 ]
+
+function getOtherOptions(
+  action: ApprovalAction,
+): Array<{ label: string; result: (action: ApprovalAction) => PermissionResult }> {
+  const sessionLabel =
+    action.type === 'write'
+      ? 'Yes, allow this edit tool for this session'
+      : action.type === 'browser'
+        ? 'Yes, allow this browser tool for this session'
+        : 'Yes, allow this tool for this session'
+  return OTHER_OPTIONS.map((option) =>
+    option.result(action).alwaysApprove
+      ? { ...option, label: sessionLabel }
+      : option,
+  )
+}
 
 const SANDBOX_ESCALATION_OPTIONS: Array<{
   label: string
@@ -172,9 +196,11 @@ const MCP_OPTIONS: Array<{
         ? { approved: true, addToAllowedMcpTool: a.tool }
         : { approved: true },
   },
+  {
+    label: 'Yes, allow this tool for this session',
+    result: () => ({ approved: true, alwaysApprove: true }),
+  },
   { label: 'No', result: () => ({ approved: false }) },
-  { label: 'Always allow', result: () => ({ approved: true, alwaysApprove: true }) },
-  { label: 'Allow all (session)', result: () => ({ approved: true, skipAll: true }) },
   { label: 'Say what to do instead', result: () => ({ approved: false, whatToDoInstead: '__instruct__' }) },
 ]
 
@@ -185,7 +211,7 @@ export function NexusApprovalPanel({
   cwd,
 }: Props): React.ReactNode {
   const theme = getTheme()
-  const { columns } = useTerminalSize()
+  const { columns, rows } = useTerminalSize()
   const [customInstruction, setCustomInstruction] = useState('')
   const [mode, setMode] = useState<'choose' | 'instruct'>('choose')
 
@@ -196,7 +222,7 @@ export function NexusApprovalPanel({
         ? getExecuteOptions(action)
         : action.type === 'mcp'
           ? getMcpOptions(action, cwd)
-          : OTHER_OPTIONS
+          : getOtherOptions(action)
   const optionCount = options.length
   const [selectedIndex, setSelectedIndex] = useState(0)
 
@@ -372,11 +398,12 @@ export function NexusApprovalPanel({
             )}
             {action.diff && (() => {
               const { lines } = parseUnifiedDiffToLines(action.diff)
-              const maxLines = 28
+              const maxLines = computeApprovalDiffLineLimit(rows, optionCount)
               const showLines = lines.slice(0, maxLines)
               const truncated = lines.length > maxLines
               const nums = showLines.map((l) => l.lineNum)
               const lineNumWidth = nums.length ? Math.max(3, String(Math.max(...nums)).length) : 3
+              const maxTextWidth = Math.max(4, columns - lineNumWidth - 5)
               return (
                 <Box flexDirection="column" marginTop={1}>
                   {showLines.map((seg, i) => (
@@ -384,11 +411,15 @@ export function NexusApprovalPanel({
                       <Text dimColor>
                         {seg.lineNum.toString().padStart(lineNumWidth)}{' '}
                         {seg.type === 'remove' ? (
-                          <Text color={theme.diff.removed}>- {seg.text}</Text>
+                          <Text color={theme.diff.removed}>
+                            - {truncateToDisplayWidth(seg.text, maxTextWidth)}
+                          </Text>
                         ) : seg.type === 'add' ? (
-                          <Text color={theme.diff.added}>+ {seg.text}</Text>
+                          <Text color={theme.diff.added}>
+                            + {truncateToDisplayWidth(seg.text, maxTextWidth)}
+                          </Text>
                         ) : (
-                          <>  {seg.text}</>
+                          <>  {truncateToDisplayWidth(seg.text, maxTextWidth)}</>
                         )}
                       </Text>
                     </Box>

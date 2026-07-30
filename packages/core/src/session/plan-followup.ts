@@ -13,6 +13,10 @@ const MAX_PLAN_FOLLOWUP_BYTES = 1024 * 1024
 const MODES = new Set<Mode>(["agent", "plan", "ask", "debug", "review"])
 const MAX_APPROVED_PLAN_TODOS = 20
 const MAX_APPROVED_PLAN_TODO_CHARS = 500
+export type PlanFollowupResolution =
+  | "implemented"
+  | "revised"
+  | "abandoned"
 
 function cleanPlanMilestone(value: string): string {
   return value
@@ -76,8 +80,48 @@ export function hadPlanExit(session: ISession): boolean {
     (p) =>
       p.type === "tool" &&
       ["plan_exit", "PlanExit"].includes((p as ToolPart).tool) &&
-      (p as ToolPart).status === "completed"
+      (p as ToolPart).status === "completed" &&
+      (p as ToolPart).planFollowupResolution == null
   )
+}
+
+/**
+ * Consume the newest pending plan handoff. A PlanExit approval is a one-shot
+ * transition, not state that should be inferred forever from old history.
+ */
+export function resolvePlanFollowup(
+  session: Pick<ISession, "messages">,
+  resolution: PlanFollowupResolution,
+): boolean {
+  for (
+    let messageIndex = session.messages.length - 1;
+    messageIndex >= 0;
+    messageIndex--
+  ) {
+    const message = session.messages[messageIndex]
+    if (
+      !message ||
+      message.role !== "assistant" ||
+      !Array.isArray(message.content)
+    ) {
+      continue
+    }
+    const parts = message.content as MessagePart[]
+    for (let partIndex = parts.length - 1; partIndex >= 0; partIndex--) {
+      const part = parts[partIndex]
+      if (
+        part?.type !== "tool" ||
+        !["plan_exit", "PlanExit"].includes((part as ToolPart).tool) ||
+        (part as ToolPart).status !== "completed" ||
+        (part as ToolPart).planFollowupResolution != null
+      ) {
+        continue
+      }
+      ;(part as ToolPart).planFollowupResolution = resolution
+      return true
+    }
+  }
+  return false
 }
 
 function getTextFromMessage(msg: SessionMessage): string {

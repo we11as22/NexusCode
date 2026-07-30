@@ -1153,7 +1153,13 @@ export class NexusServerClient {
   async setSessionMode(
     sessionId: string,
     mode: Exclude<Mode, "review">,
-    options: { todo?: string } = {},
+    options: {
+      todo?: string
+      planFollowupResolution?:
+        | "implemented"
+        | "revised"
+        | "abandoned"
+    } = {},
   ): Promise<void> {
     const res = await this.request(
       this.url(`${this.sessionPath(sessionId)}/mode`, {
@@ -1165,6 +1171,12 @@ export class NexusServerClient {
         body: JSON.stringify({
           mode,
           ...(options.todo !== undefined ? { todo: options.todo } : {}),
+          ...(options.planFollowupResolution !== undefined
+            ? {
+                planFollowupResolution:
+                  options.planFollowupResolution,
+              }
+            : {}),
         }),
       },
     )

@@ -232,7 +232,9 @@ export {
   hadPlanExit,
   getPlanContentForFollowup,
   getSessionModeForResume,
+  resolvePlanFollowup,
 } from "./session/plan-followup.js"
+export type { PlanFollowupResolution } from "./session/plan-followup.js"
 export {
   compactSessionAndPersist,
   createCompaction,

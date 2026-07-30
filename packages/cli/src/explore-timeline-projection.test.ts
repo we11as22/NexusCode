@@ -6,7 +6,10 @@ import {
   reorderMessages,
   timelineSourceMessages,
 } from "./utils/messages.js"
-import { buildChatTimeline } from "./utils/exploreTimeline.js"
+import {
+  buildChatTimeline,
+  exploreSegmentShouldBeTransient,
+} from "./utils/exploreTimeline.js"
 
 function progress(id: string, name: string, path: string): Message {
   return {
@@ -107,6 +110,9 @@ describe("CLI explore timeline projection", () => {
     expect(explore?.kind).toBe("explore")
     if (explore?.kind === "explore") {
       expect([...explore.toolUseIds]).toEqual(["read-alpha", "read-beta"])
+      expect(
+        exploreSegmentShouldBeTransient(explore, new Set(), new Set()),
+      ).toBe(false)
     }
 
     const renderedToolIds = projected.flatMap((message) => {
@@ -117,5 +123,35 @@ describe("CLI explore timeline projection", () => {
       )
     })
     expect(renderedToolIds).toEqual(["read-alpha", "read-beta"])
+  })
+
+  it("keeps an unfinished explore wave live", () => {
+    const projected = reorderMessages(
+      timelineSourceMessages([
+        progress("read-alpha", "Read", "alpha.txt"),
+        assistant("tool", [
+          {
+            type: "tool_use",
+            id: "read-alpha",
+            name: "Read",
+            input: { file_path: "alpha.txt" },
+          },
+        ]),
+      ]),
+    )
+    const explore = buildChatTimeline(projected).find(
+      (piece) => piece.kind === "explore",
+    )
+
+    expect(explore?.kind).toBe("explore")
+    if (explore?.kind === "explore") {
+      expect(
+        exploreSegmentShouldBeTransient(
+          explore,
+          new Set(["read-alpha"]),
+          new Set(["read-alpha"]),
+        ),
+      ).toBe(true)
+    }
   })
 })

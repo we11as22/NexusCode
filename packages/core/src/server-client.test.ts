@@ -112,6 +112,7 @@ describe("NexusServerClient authorization", () => {
     await client.getMessages("session_test")
     await client.setSessionMode("session_test", "plan", {
       todo: '[{"id":"plan-1","content":"Inspect","status":"in_progress"}]',
+      planFollowupResolution: "revised",
     })
     await client.deleteSession("session_test")
 
@@ -130,6 +131,7 @@ describe("NexusServerClient authorization", () => {
     expect(JSON.parse(String(modeRequest?.[1]?.body))).toEqual({
       mode: "plan",
       todo: '[{"id":"plan-1","content":"Inspect","status":"in_progress"}]',
+      planFollowupResolution: "revised",
     })
   })
 

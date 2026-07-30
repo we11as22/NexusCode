@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest"
 
 import {
   computeCliRenderWindowStart,
+  partitionCliRenderItems,
+  shouldKeepLatestAssistantMessageLive,
   type CliRenderWindowAnchor,
 } from "./cli-render-window.js"
 
@@ -45,5 +47,54 @@ describe("CLI transcript render window", () => {
       computeCliRenderWindowStart(["compaction-boundary"], anchor, 200, 50),
     ).toBe(0)
     expect(anchor.current).toEqual({ key: "compaction-boundary", index: 0 })
+  })
+})
+
+describe("CLI static transcript prefix", () => {
+  it("freezes only the contiguous completed prefix", () => {
+    const items = [
+      { key: "user", type: "static" as const },
+      { key: "thought", type: "static" as const },
+      { key: "tool", type: "transient" as const },
+      { key: "result", type: "static" as const },
+    ]
+
+    expect(partitionCliRenderItems(items)).toEqual({
+      staticPrefix: items.slice(0, 2),
+      liveSuffix: items.slice(2),
+    })
+  })
+
+  it("freezes an entirely completed transcript", () => {
+    const items = [
+      { key: "user", type: "static" as const },
+      { key: "answer", type: "static" as const },
+    ]
+
+    expect(partitionCliRenderItems(items)).toEqual({
+      staticPrefix: items,
+      liveSuffix: [],
+    })
+  })
+
+  it("keeps an entirely live transcript dynamic", () => {
+    const items = [{ key: "tool", type: "transient" as const }]
+
+    expect(partitionCliRenderItems(items)).toEqual({
+      staticPrefix: [],
+      liveSuffix: items,
+    })
+  })
+
+  it("keeps only the latest assistant draft live while a turn is streaming", () => {
+    expect(
+      shouldKeepLatestAssistantMessageLive(true, "assistant-new", "assistant-new"),
+    ).toBe(true)
+    expect(
+      shouldKeepLatestAssistantMessageLive(true, "assistant-old", "assistant-new"),
+    ).toBe(false)
+    expect(
+      shouldKeepLatestAssistantMessageLive(false, "assistant-new", "assistant-new"),
+    ).toBe(false)
   })
 })

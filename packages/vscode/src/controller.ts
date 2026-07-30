@@ -75,6 +75,8 @@ import {
   getModelsCatalog,
   approvedPlanTodo,
   hadPlanExit,
+  resolvePlanFollowup,
+  transitionSessionMode,
   getPlanContentForFollowup,
   getSessionModeForResume,
   NexusServerClient,
@@ -598,6 +600,17 @@ export class Controller {
 
   private resetWebviewMessageWindow(): void {
     this.webviewMessageLimit = INITIAL_SERVER_MESSAGES
+  }
+
+  private resetSessionScopedUiState(): void {
+    this.sessionUnacceptedEdits = []
+    this.changeSetReviewSessionId = null
+    this.pendingWriteApprovalPreview = null
+    this.streamLastSpawnAgentPartId = null
+    this.lastContextUsage = null
+    this.toolContributionDiagnostics = []
+    this.pendingQuestionRequest = null
+    this.loadingOlderMessages = false
   }
 
   private updatePendingWriteApprovalPreview(event: AgentEvent): void {
@@ -2382,11 +2395,13 @@ export class Controller {
 
   private async persistSessionMode(
     mode: Exclude<Mode, "review">,
+    resolution?: import("@nexuscode/core").PlanFollowupResolution,
   ): Promise<void> {
-    this.mode = mode
     const session = this.session
-    if (!session) return
-    session.setMode(mode)
+    if (!session) {
+      this.mode = mode
+      return
+    }
 
     const cwd = this.getCwd()
     const serverUrl = this.getServerUrl()
@@ -2395,30 +2410,49 @@ export class Controller {
         await (await this.createServerClient(cwd))
           .setSessionMode(this.serverSessionId, mode, {
             todo: session.getTodo(),
+            ...(resolution
+              ? { planFollowupResolution: resolution }
+              : {}),
           })
       } catch (error) {
         this.reportServerError(error)
+        throw error
       }
+      if (resolution) resolvePlanFollowup(session, resolution)
+      session.setMode(mode)
+      this.mode = mode
       return
     }
 
     const updated = await mutateSession(
       session.id,
       cwd,
-      (stored) => ({
-        ...stored,
-        mode,
-        planReturnMode: session.getPlanReturnMode(),
-        todo: session.getTodo(),
-        ts: Date.now(),
-      }),
+      (stored) => {
+        if (resolution) resolvePlanFollowup(stored, resolution)
+        const transition = transitionSessionMode(
+          stored.mode,
+          stored.planReturnMode,
+          mode,
+        )
+        return {
+          ...stored,
+          ...transition,
+          todo: session.getTodo(),
+          ts: Date.now(),
+        }
+      },
       { expectedRevision: session.getDurableRevision() },
     )
     if (!updated) {
+      if (resolution) resolvePlanFollowup(session, resolution)
+      session.setMode(mode)
       await session.save()
     } else {
+      if (resolution) resolvePlanFollowup(session, resolution)
+      session.setMode(mode)
       session.acknowledgeDurableRevision(updated.revision ?? 0)
     }
+    this.mode = mode
   }
 
   /** Load skills from config paths, skillsUrls registries, Nexus skill dirs (.nexus/skills), Claude ~/.claude/skills, walk-up, send to webview Skills list. */
@@ -2489,8 +2523,7 @@ export class Controller {
     }
     this.session = undefined
     this.resetWebviewMessageWindow()
-    this.sessionUnacceptedEdits = []
-    this.changeSetReviewSessionId = null
+    this.resetSessionScopedUiState()
     this.serverSessionOldestLoadedOffset = undefined
     this.checkpoint = undefined
     this.serverSessionId = undefined
@@ -3619,7 +3652,7 @@ export class Controller {
             storedReturnMode === "review"
               ? "agent"
               : (storedReturnMode ?? "agent")
-          await this.persistSessionMode(returnMode)
+          await this.persistSessionMode(returnMode, "abandoned")
           this.postStateToWebview()
           break
         }
@@ -3633,6 +3666,7 @@ export class Controller {
             : "Implement the plan above."
           if (msg.newSession && this.session) {
             const freshPlanText = planText || (await getPlanContentForFollowup(this.session, cwd))
+            await this.persistSessionMode("plan", "implemented")
             this.session = Session.create(cwd)
             this.resetWebviewMessageWindow()
             this.session.setMode("agent")
@@ -3663,7 +3697,7 @@ export class Controller {
           } else {
             if (this.session) {
               this.session.updateTodo(approvedPlanTodo(planText))
-              await this.persistSessionMode("agent")
+              await this.persistSessionMode("agent", "implemented")
               this.postStateToWebview()
             }
             await this.runAgent(
@@ -3679,7 +3713,7 @@ export class Controller {
           break
         }
         if (msg.choice === "revise") {
-          this.mode = "plan"
+          await this.persistSessionMode("plan", "revised")
           const planText =
             msg.planText?.trim() ||
             (this.session ? await getPlanContentForFollowup(this.session, cwd) : "")
@@ -5579,6 +5613,7 @@ export class Controller {
           meta.mode ?? null,
           meta.planReturnMode ?? null,
         )
+        this.resetSessionScopedUiState()
         this.mode = getSessionModeForResume(this.session, this.mode)
         this.serverSessionId = sessionId
         await this.getRemoteWorkspaceState(cwd)
@@ -5601,14 +5636,12 @@ export class Controller {
     const loaded = await Session.resumeWindow(sessionId, cwd, INITIAL_SERVER_MESSAGES, offset)
     if (loaded) {
       this.session = loaded
+      this.resetSessionScopedUiState()
       this.mode = getSessionModeForResume(loaded, this.mode)
       await this.setSelectedLocalSessionId(sessionId, cwd)
-      this.sessionUnacceptedEdits = []
-      this.changeSetReviewSessionId = null
       this.serverSessionId = undefined
       this.serverSessionOldestLoadedOffset = offset
       this.localSessionWindowed = offset > 0
-      this.pendingQuestionRequest = null
       this.checkpoint = undefined
       this.postStateToWebview()
     }
@@ -5644,13 +5677,10 @@ export class Controller {
       await this.setSelectedLocalSessionId(this.session.id, cwd)
       this.serverSessionId = undefined
     }
-    this.sessionUnacceptedEdits = []
-    this.changeSetReviewSessionId = null
+    this.resetSessionScopedUiState()
     this.serverSessionOldestLoadedOffset = undefined
     this.localSessionWindowed = false
-    this.pendingQuestionRequest = null
     this.checkpoint = undefined
-    this.lastContextUsage = null
     this.postStateToWebview()
     void this.postSlashCommandCatalog().catch(() => undefined)
     await this.sendSessionList()
@@ -5684,6 +5714,7 @@ export class Controller {
         try {
           const created = await (await this.createServerClient(cwd)).createSession()
           this.session = new Session(created.id, cwd, [], undefined, true)
+          this.resetSessionScopedUiState()
           this.serverSessionId = created.id
           await this.getRemoteWorkspaceState(cwd)
             .setSelectedSessionId(created.id)
@@ -5694,6 +5725,7 @@ export class Controller {
         }
       } else {
         this.session = Session.create(cwd)
+        this.resetSessionScopedUiState()
         await this.session.save()
         await this.setSelectedLocalSessionId(this.session.id, cwd)
         this.serverSessionId = undefined

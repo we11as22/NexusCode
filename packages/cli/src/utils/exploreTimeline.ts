@@ -334,16 +334,21 @@ export function exploreSegmentTouchesUnresolved(
 }
 
 /**
- * Explore rows must never land in Ink `<Static>`: any live update (tools, ctrl+o, model
- * still streaming) would freeze the subtree. Cost: these lines stay in the transient
- * region (acceptable for a small block count).
+ * Keep a wave live until both its visual boundary and every tool result are
+ * settled. Afterwards the compact summary is immutable and may move to Ink
+ * scrollback; leaving every historical explore wave live makes long sessions
+ * exceed the viewport and forces Ink to clear the whole terminal.
  */
 export function exploreSegmentShouldBeTransient(
-  _piece: Extract<ChatTimelinePiece, { kind: 'explore' }>,
-  _unresolvedToolUseIDs: Set<string>,
-  _inProgressToolUseIDs: Set<string>,
+  piece: Extract<ChatTimelinePiece, { kind: 'explore' }>,
+  unresolvedToolUseIDs: Set<string>,
+  inProgressToolUseIDs: Set<string>,
 ): boolean {
-  return true
+  if (!piece.waveFinalized) return true
+  return (
+    exploreSegmentTouchesUnresolved(piece.toolUseIds, unresolvedToolUseIDs) ||
+    exploreSegmentTouchesUnresolved(piece.toolUseIds, inProgressToolUseIDs)
+  )
 }
 
 function isSubagentParentToolUse(block: ToolUseBlockParam): boolean {

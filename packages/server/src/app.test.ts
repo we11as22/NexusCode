@@ -330,6 +330,25 @@ describe("server boundary", () => {
     })
   })
 
+  it("rejects invalid plan follow-up resolutions before storage lookup", async () => {
+    const response = await app().request("/session/session_plan/mode", {
+      method: "PATCH",
+      headers: {
+        ...authHeaders(),
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        mode: "agent",
+        planFollowupResolution: "silently-ignore",
+      }),
+    })
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual({
+      error: "Invalid plan follow-up resolution",
+    })
+  })
+
   it("rejects unsafe session identifiers before they reach storage", async () => {
     const response = await app().request("/session/%2e%2e%5cescape", {
       headers: authHeaders(),

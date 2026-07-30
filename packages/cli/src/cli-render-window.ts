@@ -6,6 +6,35 @@ export type CliRenderWindowAnchor = {
   index: number
 } | null
 
+export type CliRenderItemState = {
+  type: "static" | "transient"
+}
+
+/**
+ * Ink can print completed rows to terminal scrollback with <Static>, keeping
+ * the live Yoga tree shorter than the terminal. Only a contiguous prefix may
+ * be frozen: extracting later completed rows around an active tool would
+ * reorder its result above the still-live tool call.
+ */
+export function partitionCliRenderItems<T extends CliRenderItemState>(
+  items: readonly T[],
+): { staticPrefix: T[]; liveSuffix: T[] } {
+  const firstTransient = items.findIndex((item) => item.type === "transient")
+  const prefixEnd = firstTransient === -1 ? items.length : firstTransient
+  return {
+    staticPrefix: items.slice(0, prefixEnd),
+    liveSuffix: items.slice(prefixEnd),
+  }
+}
+
+export function shouldKeepLatestAssistantMessageLive(
+  isLoading: boolean,
+  messageKey: string,
+  latestAssistantMessageKey: string | null,
+): boolean {
+  return isLoading && latestAssistantMessageKey === messageKey
+}
+
 /**
  * Keeps Stock Ink from mounting and repainting an unbounded transcript.
  *

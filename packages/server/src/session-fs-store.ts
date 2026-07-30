@@ -5,7 +5,12 @@
  * Replaces the legacy SQLite session store so server, CLI, and VS Code share one source of truth.
  */
 
-import type { Mode, NonPlanMode, SessionMessage } from "@nexuscode/core"
+import type {
+  Mode,
+  NonPlanMode,
+  PlanFollowupResolution,
+  SessionMessage,
+} from "@nexuscode/core"
 import {
   canonicalProjectRoot,
   listSessions as coreListSessions,
@@ -17,6 +22,7 @@ import {
   generateSessionId,
   SessionConflictError,
   transitionSessionMode,
+  resolvePlanFollowup,
   type StoredSession,
 } from "@nexuscode/core"
 
@@ -134,22 +140,52 @@ export async function updateSessionMode(
   cwd: string,
   mode: Mode,
   todo?: string,
+  resolution?: PlanFollowupResolution,
 ): Promise<void> {
   const root = canonicalProjectRoot(cwd)
-  const updated = await mutateSession(sessionId, root, (stored) => {
-    const transition = transitionSessionMode(
-      stored.mode,
-      stored.planReturnMode,
-      mode,
-    )
-    return {
-      ...stored,
-      ...transition,
-      ...(todo !== undefined ? { todo } : {}),
-      ts: Date.now(),
-    }
-  })
+  const updated = await mutateSession(
+    sessionId,
+    root,
+    (stored) =>
+      applySessionModeUpdate(
+        stored,
+        mode,
+        todo,
+        resolution,
+      ),
+  )
   if (!updated) throw new Error(`Session not found: ${sessionId}`)
+}
+
+export function applySessionModeUpdate(
+  stored: StoredSession,
+  mode: Mode,
+  todo?: string,
+  resolution?: PlanFollowupResolution,
+  now = Date.now(),
+): StoredSession {
+  const messages = stored.messages.map((message) =>
+    Array.isArray(message.content)
+      ? {
+          ...message,
+          content: message.content.map((part) => ({ ...part })),
+        }
+      : message,
+  )
+  const transition = transitionSessionMode(
+    stored.mode,
+    stored.planReturnMode,
+    mode,
+  )
+  const updated: StoredSession = {
+    ...stored,
+    ...transition,
+    messages,
+    ...(todo !== undefined ? { todo } : {}),
+    ts: now,
+  }
+  if (resolution) resolvePlanFollowup(updated, resolution)
+  return updated
 }
 
 export async function getMessages(

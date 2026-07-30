@@ -244,7 +244,7 @@ function ChatView() {
       {store.awaitingApproval && !store.pendingApproval && (
         <div className="nexus-approval-banner">
           <span className="nexus-approval-icon">⚠</span>
-          <span>Action awaiting your approval — use notification or chat buttons: Allow once / Always allow / Deny / Allow all (session) / Say what to do instead.</span>
+          <span>Action awaiting your approval — use notification or chat buttons: Allow once / scoped session approval / Deny / Say what to do instead.</span>
         </div>
       )}
 

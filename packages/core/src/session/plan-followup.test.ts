@@ -7,6 +7,8 @@ import {
   approvedPlanTodo,
   getPlanContentForFollowup,
   getSessionModeForResume,
+  hadPlanExit,
+  resolvePlanFollowup,
 } from "./plan-followup.js"
 
 describe("plan follow-up recovery", () => {
@@ -155,5 +157,37 @@ describe("plan follow-up recovery", () => {
     })
 
     expect(getSessionModeForResume(session, "agent")).toBe("plan")
+  })
+
+  it("consumes each completed PlanExit decision exactly once", () => {
+    const session = Session.createEphemeral("/tmp")
+    const firstAssistant = session.addMessage({
+      role: "assistant",
+      content: [],
+    })
+    session.addToolPart(firstAssistant.id, {
+      type: "tool",
+      id: "first-plan-exit",
+      tool: "PlanExit",
+      status: "completed",
+    })
+
+    expect(hadPlanExit(session)).toBe(true)
+    expect(resolvePlanFollowup(session, "abandoned")).toBe(true)
+    expect(hadPlanExit(session)).toBe(false)
+    expect(resolvePlanFollowup(session, "implemented")).toBe(false)
+
+    const revisedAssistant = session.addMessage({
+      role: "assistant",
+      content: [],
+    })
+    session.addToolPart(revisedAssistant.id, {
+      type: "tool",
+      id: "revised-plan-exit",
+      tool: "PlanExit",
+      status: "completed",
+    })
+
+    expect(hadPlanExit(session)).toBe(true)
   })
 })

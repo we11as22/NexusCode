@@ -135,9 +135,19 @@ describe("VS Code command wiring", () => {
     const body = controllerSource.slice(start, end)
 
     expect(start).toBeGreaterThanOrEqual(0)
-    expect(body).toContain("this.lastContextUsage = null")
-    expect(body.indexOf("this.lastContextUsage = null")).toBeLessThan(
+    expect(body).toContain("this.resetSessionScopedUiState()")
+    expect(body.indexOf("this.resetSessionScopedUiState()")).toBeLessThan(
       body.indexOf("this.postStateToWebview()"),
+    )
+    const resetStart = controllerSource.indexOf(
+      "private resetSessionScopedUiState(): void",
+    )
+    const resetEnd = controllerSource.indexOf(
+      "private ",
+      resetStart + 8,
+    )
+    expect(controllerSource.slice(resetStart, resetEnd)).toContain(
+      "this.lastContextUsage = null",
     )
   })
 
@@ -803,5 +813,85 @@ describe("VS Code command wiring", () => {
     )
     expect(abortCase).not.toContain("this.isRunning = false")
     expect(cancelBody).not.toContain("this.isRunning = false")
+  })
+
+  it("consumes every plan handoff decision before changing modes", () => {
+    const start = controllerSource.indexOf(
+      'case "planFollowupChoice":',
+    )
+    const end = controllerSource.indexOf(
+      'case "dismissQuestionnaire":',
+      start,
+    )
+    const body = controllerSource.slice(start, end)
+
+    expect(start).toBeGreaterThanOrEqual(0)
+    expect(body).toContain(
+      'persistSessionMode(returnMode, "abandoned")',
+    )
+    expect(body.match(
+      /persistSessionMode\((?:"agent"|"plan"), "implemented"\)/g,
+    )).toHaveLength(2)
+    expect(body).toContain(
+      'persistSessionMode("plan", "revised")',
+    )
+    const persistStart = controllerSource.indexOf(
+      "private async persistSessionMode(",
+    )
+    const persistEnd = controllerSource.indexOf(
+      "/** Load skills",
+      persistStart,
+    )
+    const persistBody = controllerSource.slice(persistStart, persistEnd)
+    expect(persistBody).toContain(
+      "resolvePlanFollowup(session, resolution)",
+    )
+    expect(persistBody).toContain(
+      "transitionSessionMode(",
+    )
+    expect(persistBody).toContain(
+      "...transition",
+    )
+  })
+
+  it("clears all session-owned UI state whenever the active chat changes", () => {
+    const resetStart = controllerSource.indexOf(
+      "private resetSessionScopedUiState(): void",
+    )
+    const resetEnd = controllerSource.indexOf(
+      "private ",
+      resetStart + 8,
+    )
+    const reset = controllerSource.slice(resetStart, resetEnd)
+
+    expect(resetStart).toBeGreaterThanOrEqual(0)
+    expect(reset).toContain("this.sessionUnacceptedEdits = []")
+    expect(reset).toContain("this.changeSetReviewSessionId = null")
+    expect(reset).toContain("this.pendingWriteApprovalPreview = null")
+    expect(reset).toContain("this.streamLastSpawnAgentPartId = null")
+    expect(reset).toContain("this.lastContextUsage = null")
+    expect(reset).toContain("this.pendingQuestionRequest = null")
+
+    const switchStart = controllerSource.indexOf(
+      "private async switchSession(",
+    )
+    const switchEnd = controllerSource.indexOf(
+      "private async createNewSession(",
+      switchStart,
+    )
+    expect(
+      controllerSource
+        .slice(switchStart, switchEnd)
+        .match(/resetSessionScopedUiState\(\)/g),
+    ).toHaveLength(2)
+
+    const createStart = switchEnd
+    const createEnd = controllerSource.indexOf(
+      "private async deleteSession(",
+      createStart,
+    )
+    expect(controllerSource.slice(createStart, createEnd)).toContain(
+      "this.resetSessionScopedUiState()",
+    )
   })
 })
