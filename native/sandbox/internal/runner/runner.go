@@ -64,14 +64,11 @@ func Run(
 		return Result{ExitCode: 1, SetupError: err}
 	}
 
-	ctx := parent
-	cancel := func() {}
-	if request.TimeoutMillis > 0 {
-		ctx, cancel = context.WithTimeout(parent, time.Duration(request.TimeoutMillis)*time.Millisecond)
-	}
-	defer cancel()
-
-	process, err := startProcess(ctx, request, command, stdout, stderr)
+	// The request timeout is an execution budget, not a sandbox preparation
+	// budget. Native policy/ACL preparation and the bounded spawn handshake run
+	// under the caller context; start the command timer only after the process
+	// exists and a started event can be emitted.
+	process, err := startProcess(parent, request, command, stdout, stderr)
 	if err != nil {
 		if stderr != nil {
 			_, _ = fmt.Fprintf(stderr, "nexus-sandbox: %v\n", err)
@@ -87,6 +84,13 @@ func Run(
 		Version: protocol.ProtocolVersion, Type: protocol.ControlStarted,
 		ExecutionID: request.ExecutionID, Sandbox: command.Sandbox,
 	})
+
+	ctx := parent
+	cancel := func() {}
+	if request.TimeoutMillis > 0 {
+		ctx, cancel = context.WithTimeout(parent, time.Duration(request.TimeoutMillis)*time.Millisecond)
+	}
+	defer cancel()
 
 	waited := make(chan error, 1)
 	go func() { waited <- process.Wait() }()

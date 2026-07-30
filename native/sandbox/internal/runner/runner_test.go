@@ -142,10 +142,59 @@ func TestRunNativeSandboxTimeoutTerminatesWholeProcessBoundary(t *testing.T) {
 	}
 }
 
+func TestRunCommandTimeoutStartsAfterNativeSpawn(t *testing.T) {
+	request := protocol.Request{
+		Version:       protocol.ProtocolVersion,
+		ExecutionID:   "post-spawn-timeout",
+		Argv:          []string{"ignored"},
+		Cwd:           t.TempDir(),
+		ReadableRoots: nil,
+		Network:       protocol.NetworkRestricted,
+		TimeoutMillis: 40,
+	}
+	request.ReadableRoots = []string{request.Cwd}
+	process := &successfulProcess{wait: make(chan error, 1)}
+	result := Run(
+		context.Background(),
+		request,
+		Command{
+			Sandbox: "native-test",
+			Start: func(
+				context.Context,
+				protocol.Request,
+				io.Writer,
+				io.Writer,
+			) (Process, error) {
+				time.Sleep(30 * time.Millisecond)
+				go func() {
+					time.Sleep(20 * time.Millisecond)
+					process.wait <- nil
+				}()
+				return process, nil
+			},
+		},
+		io.Discard,
+		io.Discard,
+		io.Discard,
+	)
+	if result.TimedOut || result.ExitCode != 0 {
+		t.Fatalf("setup time consumed command budget: %#v", result)
+	}
+}
+
 type fakeProcess struct {
 	wait           chan error
 	terminateCalls int
 }
+
+type successfulProcess struct {
+	wait chan error
+}
+
+func (process *successfulProcess) Wait() error        { return <-process.wait }
+func (process *successfulProcess) Terminate()         { process.wait <- errors.New("terminated") }
+func (process *successfulProcess) Kill()              { process.wait <- errors.New("killed") }
+func (process *successfulProcess) ExitCode(error) int { return 0 }
 
 func (process *fakeProcess) Wait() error {
 	return <-process.wait
