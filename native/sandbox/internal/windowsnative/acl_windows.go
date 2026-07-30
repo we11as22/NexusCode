@@ -682,7 +682,7 @@ func materializeProtectedRoot(root string, writableRoots []string) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("inspect protected root %q: %w", root, err)
 	}
-	canonical, err := windowsmodel.CanonicalWindowsPath(root)
+	canonical, err := canonicalProspectivePath(root)
 	if err != nil {
 		return err
 	}
@@ -700,6 +700,35 @@ func materializeProtectedRoot(root string, writableRoots []string) error {
 		}
 	}
 	return fmt.Errorf("protected root does not exist outside writable authority: %q", root)
+}
+
+// canonicalProspectivePath resolves the deepest existing ancestor before
+// appending missing path components. This matters on Windows because the same
+// directory can arrive through an 8.3 alias (for example RUNNER~1) while
+// EvalSymlinks returns its long name. Comparing the unresolved missing child
+// against a resolved writable root would otherwise produce a false boundary
+// denial.
+func canonicalProspectivePath(candidate string) (string, error) {
+	current := filepath.Clean(candidate)
+	missing := make([]string, 0, 4)
+	for {
+		resolved, err := filepath.EvalSymlinks(current)
+		if err == nil {
+			for index := len(missing) - 1; index >= 0; index-- {
+				resolved = filepath.Join(resolved, missing[index])
+			}
+			return windowsmodel.CanonicalWindowsPath(resolved)
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("resolve prospective sandbox root %q: %w", candidate, err)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", fmt.Errorf("resolve prospective sandbox root %q: %w", candidate, err)
+		}
+		missing = append(missing, filepath.Base(current))
+		current = parent
+	}
 }
 
 func canonicalResolvedRoot(root string) (string, error) {
