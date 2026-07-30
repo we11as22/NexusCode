@@ -46,15 +46,15 @@ jobs:
         run: go test ./...
       - name: Test shared sandbox protocol
         run: corepack pnpm --filter @nexuscode/sandbox test
+      - name: Build Windows sandbox package
+        env:
+          NEXUS_SANDBOX_TARGETS: win32-x64,win32-arm64
+        run: corepack pnpm --filter @nexuscode/sandbox build
       - name: Typecheck Windows host integrations
         run: |
           corepack pnpm --filter @nexuscode/sandbox typecheck
           corepack pnpm --filter @nexuscode/cli typecheck
           corepack pnpm --dir packages/vscode typecheck
-      - name: Build Windows sandbox helper
-        env:
-          NEXUS_SANDBOX_TARGETS: win32-x64,win32-arm64
-        run: corepack pnpm --filter @nexuscode/sandbox build:native
       - name: Provision Windows sandbox identities and policy
         run: packages\sandbox\vendor\win32-x64\nexus-sandbox.exe --setup-elevated
       - name: Verify Windows sandbox setup
