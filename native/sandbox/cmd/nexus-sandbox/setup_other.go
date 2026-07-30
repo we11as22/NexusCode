@@ -24,6 +24,10 @@ func runWindowsCommandRunner(string) int {
 	return 125
 }
 
-func verifyPlatformInstallation() error {
+func verifyPlatformReadiness() error {
+	return nil
+}
+
+func auditPlatformInstallation() error {
 	return nil
 }

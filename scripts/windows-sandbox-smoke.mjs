@@ -172,6 +172,26 @@ try {
     throw new Error("workspace write produced unexpected content")
   }
 
+  const powershellWrite = runSandbox(
+    request([
+      powershell,
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      "[IO.File]::WriteAllText((Join-Path (Get-Location) 'powershell-ok.txt'),'powershell-ok')",
+    ]),
+  )
+  if (
+    powershellWrite.status !== 0 ||
+    fs.readFileSync(path.join(workspace, "powershell-ok.txt"), "utf8") !==
+      "powershell-ok"
+  ) {
+    throw new Error(
+      `PowerShell workspace flow failed: ${JSON.stringify(powershellWrite)}`,
+    )
+  }
+
   const outsideWrite = runSandbox(
     request([
       comSpec,
@@ -245,15 +265,17 @@ try {
     )
   }
 
+  const networkProbe = [
+    "const http=require('http');",
+    `const req=http.get('http://127.0.0.1:${loopbackPort}',res=>{`,
+    "res.resume();",
+    "res.on('end',()=>process.exit(res.statusCode===200?0:2));",
+    "});",
+    "req.on('error',()=>process.exit(3));",
+    "setTimeout(()=>process.exit(4),5000).unref();",
+  ].join("")
   const onlineNetwork = runSandbox(
-    request([
-      powershell,
-      "-NoLogo",
-      "-NoProfile",
-      "-NonInteractive",
-      "-Command",
-      `$ProgressPreference='SilentlyContinue'; Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 http://127.0.0.1:${loopbackPort} | Out-Null`,
-    ], { network: "enabled" }),
+    request([process.execPath, "-e", networkProbe], { network: "enabled" }),
   )
   if (onlineNetwork.status !== 0) {
     throw new Error(
@@ -262,14 +284,7 @@ try {
   }
 
   const offlineNetwork = runSandbox(
-    request([
-      powershell,
-      "-NoLogo",
-      "-NoProfile",
-      "-NonInteractive",
-      "-Command",
-      `$ProgressPreference='SilentlyContinue'; Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 http://127.0.0.1:${loopbackPort} | Out-Null`,
-    ]),
+    request([process.execPath, "-e", networkProbe]),
   )
   if (offlineNetwork.status === 0) {
     throw new Error("offline sandbox unexpectedly reached loopback")

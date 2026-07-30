@@ -1070,6 +1070,18 @@ ${commandList}`,
       process.exit(0)
     })
 
+  sandbox
+    .command('audit')
+    .description('Deeply verify Windows sandbox identities and firewall policy')
+    .action(() => {
+      const helper = resolveSandboxBinary()
+      execFileSync(helper, ['--audit'], {
+        stdio: 'inherit',
+        windowsHide: true,
+      })
+      process.exit(0)
+    })
+
   program
     .command('doctor')
     .description('Check the NexusCode runtime, workspace, and local tools')

@@ -24,6 +24,10 @@ func runWindowsCommandRunner(envelopePath string) int {
 	return windowsnative.RunCommandRunner(envelopePath)
 }
 
-func verifyPlatformInstallation() error {
+func verifyPlatformReadiness() error {
+	return windowsnative.RequireReady()
+}
+
+func auditPlatformInstallation() error {
 	return windowsnative.VerifyInstallation()
 }

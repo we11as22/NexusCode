@@ -57,7 +57,9 @@ jobs:
           corepack pnpm --dir packages/vscode typecheck
       - name: Provision Windows sandbox identities and policy
         run: packages\sandbox\vendor\win32-x64\nexus-sandbox.exe --setup-elevated
-      - name: Verify Windows sandbox setup
+      - name: Audit Windows sandbox installation
+        run: packages\sandbox\vendor\win32-x64\nexus-sandbox.exe --audit
+      - name: Verify Windows sandbox runtime
         run: packages\sandbox\vendor\win32-x64\nexus-sandbox.exe --check
       - name: Exercise Windows security boundaries
         env:

@@ -137,7 +137,13 @@ On Windows, repair or inspect the native boundary independently with:
 ```powershell
 nexus sandbox setup
 nexus sandbox status
+nexus sandbox audit
 ```
+
+`status` performs the bounded operational spawn used by normal CLI/extension
+startup. `audit` is the slower deep check for account membership, hidden
+sign-in identities, protected credentials, and the persistent offline firewall
+policy; setup and CI run that audit explicitly.
 
 ---
 

@@ -38,6 +38,10 @@ func main() {
 		checkBackend()
 		return
 	}
+	if len(os.Args) == 2 && os.Args[1] == "--audit" {
+		auditBackendInstallation()
+		return
+	}
 	if len(os.Args) == 2 && os.Args[1] == "--status-json" {
 		if err := writePlatformStatus(os.Stdout); err != nil {
 			fmt.Fprintf(os.Stderr, "sandbox status failed: %v\n", err)
@@ -53,7 +57,7 @@ func main() {
 		return
 	}
 	if len(os.Args) != 1 {
-		fmt.Fprintln(os.Stderr, "usage: nexus-sandbox [--version|--check|--status-json|--setup]")
+		fmt.Fprintln(os.Stderr, "usage: nexus-sandbox [--version|--check|--audit|--status-json|--setup]")
 		os.Exit(125)
 	}
 
@@ -90,7 +94,7 @@ func main() {
 // command. Installers and `nexus doctor` use this to avoid treating a
 // version-printing but fail-closed helper as operational.
 func checkBackend() {
-	if err := verifyPlatformInstallation(); err != nil {
+	if err := verifyPlatformReadiness(); err != nil {
 		fmt.Fprintf(os.Stderr, "sandbox backend unavailable: %v\n", err)
 		os.Exit(125)
 	}
@@ -176,6 +180,14 @@ func checkBackend() {
 		os.Exit(125)
 	}
 	fmt.Printf("nexus-sandbox backend=%s ready\n", command.Sandbox)
+}
+
+func auditBackendInstallation() {
+	if err := auditPlatformInstallation(); err != nil {
+		fmt.Fprintf(os.Stderr, "sandbox installation audit failed: %v\n", err)
+		os.Exit(125)
+	}
+	fmt.Printf("nexus-sandbox installation=verified\n")
 }
 
 func controlWriter() io.Writer {
