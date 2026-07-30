@@ -72,6 +72,13 @@ VS Code/Cursor-compatible editor, verifies the reported extension version, and
 finishes with `nexus doctor`. It does not delete `node_modules` or the pnpm
 store.
 
+This command builds from a **source checkout**, so the checkout path needs Go
+(the version pinned by `native/sandbox/go.mod`). Linux source builds also need
+a C compiler, `pkg-config`, and the libcap development headers for the bundled
+Bubblewrap companion. Published NexusCode CLI/VSIX release artifacts carry the
+matching verified native helper and do not require an end user to install a
+Go or Rust toolchain.
+
 ### Native sandbox support
 
 | Platform | Backend | Current verification |

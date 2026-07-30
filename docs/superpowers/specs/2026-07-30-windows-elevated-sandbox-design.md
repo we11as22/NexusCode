@@ -111,7 +111,9 @@ Windows x64 и arm64 cross-build выполняется одним release/CI jo
 появления доступного arm64 runner.
 Release job публикует `nexus-sandbox.exe` и SHA-256 manifest. Установщик и VSIX
 берут только артефакт подходящих platform/arch, проверяют hash, `--version` и
-`--check`; пользователю не нужен Go/Rust toolchain.
+`--check`; пользователю готового release не нужен Go/Rust toolchain. Локальный
+`./install.sh` из source checkout остаётся contributor-build и требует Go,
+потому что намеренно собирает доверенный helper из зафиксированных исходников.
 
 Локальная cross-build проверяет PE-артефакт и platform-neutral тесты. Она не
 подменяет Windows smoke suite.
