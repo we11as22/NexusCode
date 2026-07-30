@@ -26,6 +26,7 @@ test("build and installer surfaces target the pinned Node 24 runtime", async () 
     extensionInstaller,
     oneInstall,
     vsixPackager,
+    windowsSandboxSmoke,
   ] = await Promise.all([
     readFile(new URL("../package.json", import.meta.url), "utf8"),
     readFile(new URL("../packages/cli/package.json", import.meta.url), "utf8"),
@@ -38,6 +39,7 @@ test("build and installer surfaces target the pinned Node 24 runtime", async () 
       new URL("../packages/vscode/scripts/package-vsix.cjs", import.meta.url),
       "utf8",
     ),
+    readFile(new URL("./windows-sandbox-smoke.mjs", import.meta.url), "utf8"),
   ])
   const rootPackage = JSON.parse(rootPackageText)
   const cliPackage = JSON.parse(cliPackageText)
@@ -102,6 +104,16 @@ test("build and installer surfaces target the pinned Node 24 runtime", async () 
   )
   assert.match(vsixPackager, /corepack pnpm exec vsce package/)
   assert.doesNotMatch(vsixPackager, /node18|(?:^|\n)pnpm exec/)
+  assert.match(
+    windowsSandboxSmoke,
+    /const helper = path\.resolve\(/,
+    "the Windows smoke launcher must canonicalize relative helper paths before spawn",
+  )
+  assert.match(
+    windowsSandboxSmoke,
+    /fs\.statSync\(helper\)\.isFile\(\)/,
+    "the Windows smoke launcher must fail clearly when the helper is missing",
+  )
 })
 
 test("rejects every unpinned runtime", () => {

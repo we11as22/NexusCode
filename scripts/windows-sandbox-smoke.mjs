@@ -8,15 +8,19 @@ if (process.platform !== "win32") {
   throw new Error("windows-sandbox-smoke.mjs must run on Windows")
 }
 
-const helper =
+const helper = path.resolve(
   process.env.NEXUS_SANDBOX_HELPER ??
-  path.resolve(
-    "packages",
-    "sandbox",
-    "vendor",
-    `win32-${process.arch}`,
-    "nexus-sandbox.exe",
-  )
+    path.join(
+      "packages",
+      "sandbox",
+      "vendor",
+      `win32-${process.arch}`,
+      "nexus-sandbox.exe",
+    ),
+)
+if (!fs.existsSync(helper) || !fs.statSync(helper).isFile()) {
+  throw new Error(`Windows sandbox helper not found: ${helper}`)
+}
 const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "nexus-win-smoke-"))
 const sandboxTemp = fs.mkdtempSync(path.join(workspace, ".sandbox-temp-"))
 const protectedGit = path.join(workspace, ".git")
