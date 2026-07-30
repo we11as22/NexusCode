@@ -307,7 +307,7 @@ func applyAuthorityACLs(
 	readable := append([]string(nil), request.ReadableRoots...)
 	sort.Strings(readable)
 	if changed, err := applyAncestorTraverseACLs(
-		readable,
+		[]string{request.Cwd},
 		plan,
 		groupSID,
 		&state,
@@ -480,6 +480,23 @@ func applyAncestorTraverseACLs(
 			}
 			return false, fmt.Errorf("resolve readable root ancestors %q: %w", root, err)
 		}
+		stopAt := ""
+		if profile := os.Getenv("USERPROFILE"); profile != "" {
+			profileResolved, resolveErr := filepath.EvalSymlinks(profile)
+			if resolveErr == nil {
+				profileKey, keyErr := windowsmodel.CanonicalWindowsPath(profileResolved)
+				targetKey, targetErr := windowsmodel.CanonicalWindowsPath(target)
+				if keyErr == nil && targetErr == nil {
+					contains, containsErr := windowsmodel.WindowsPathContains(
+						profileKey,
+						targetKey,
+					)
+					if containsErr == nil && contains {
+						stopAt = profileKey
+					}
+				}
+			}
+		}
 		for parent := filepath.Dir(target); ; parent = filepath.Dir(parent) {
 			next := filepath.Dir(parent)
 			if next == parent {
@@ -493,13 +510,20 @@ func applyAncestorTraverseACLs(
 				continue
 			}
 			seen[key] = struct{}{}
+			atStopBoundary := stopAt != "" && key == stopAt
 			// Never downgrade a selected root that is also an ancestor of a
 			// narrower readable root (for example workspace/.sandbox-temp).
 			if _, selectedRoot := plan.Roots[key]; selectedRoot {
+				if atStopBoundary {
+					break
+				}
 				continue
 			}
 			fingerprint := groupSID + "|traverse-v1"
 			if state.Traverse[key] == fingerprint {
+				if atStopBoundary {
+					break
+				}
 				continue
 			}
 			if err := replaceNamedACLEntries(
@@ -519,6 +543,9 @@ func applyAncestorTraverseACLs(
 			}
 			state.Traverse[key] = fingerprint
 			changed = true
+			if atStopBoundary {
+				break
+			}
 		}
 	}
 	return changed, nil
