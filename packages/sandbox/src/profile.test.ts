@@ -53,6 +53,9 @@ describe("createSandboxRequest", () => {
     expect(request.inheritEnv).toBe(false)
     expect(request.environment?.NEXUS_SANDBOX).toBe("1")
     expect(request.environment?.NEXUS_SANDBOX_NETWORK_DISABLED).toBe("1")
+    expect(request.environment?.HTTPS_PROXY).toBe("http://127.0.0.1:9")
+    expect(request.environment?.NPM_CONFIG_OFFLINE).toBe("true")
+    expect(request.environment?.GIT_SSH_COMMAND).toBe("/usr/bin/false")
     expect(request.environment?.TMPDIR).toBe(path.join(cwd, ".tmp"))
   })
 
@@ -101,6 +104,11 @@ describe("createSandboxRequest", () => {
       platform: "win32",
       windowsComSpec: "C:\\Windows\\System32\\cmd.exe",
       tempDir: "C:\\Temp",
+      environment: {
+        SystemRoot: "C:\\Windows",
+        ProgramFiles: "C:\\Program Files",
+        Path: "C:\\Windows\\System32;C:\\Tools\\bin",
+      },
     })
 
     expect(request.argv).toEqual([
@@ -110,7 +118,17 @@ describe("createSandboxRequest", () => {
       "/c",
       "echo ok",
     ])
-    expect(request.readableRoots).toContain("C:\\")
+    expect(request.readableRoots).toEqual(
+      expect.arrayContaining([
+        "C:\\workspace",
+        "C:\\Temp",
+        "C:\\Windows\\System32",
+        "C:\\Windows",
+        "C:\\Program Files",
+        "C:\\Tools\\bin",
+      ]),
+    )
+    expect(request.readableRoots).not.toContain("C:\\")
     expect(request.environment?.PATHEXT).toBeTruthy()
   })
 
@@ -190,5 +208,34 @@ describe("createSandboxRequest", () => {
       "NEXUS_SANDBOX",
     ])
     expect(request.environment?.NEXUS_SANDBOX).toBe("1")
+    expect(request.environment?.GIT_SSH_COMMAND).toBe(
+      "cmd.exe /d /s /c exit 1",
+    )
+  })
+
+  it("preserves caller networking configuration when network is approved", () => {
+    const cwd = path.resolve(os.tmpdir(), "nexus-profile-network-enabled")
+    const request = createSandboxRequest({
+      executionId: "exec-network-enabled",
+      command: "git fetch",
+      cwd,
+      workspaceRoots: [cwd],
+      tempDir: path.join(cwd, ".tmp"),
+      profile: "workspace-write",
+      network: "enabled",
+      platform: "darwin",
+      environment: {
+        HTTPS_PROXY: "http://proxy.example:8080",
+        NPM_CONFIG_OFFLINE: "false",
+      },
+    })
+
+    expect(request.environment).not.toHaveProperty(
+      "NEXUS_SANDBOX_NETWORK_DISABLED",
+    )
+    expect(request.environment?.HTTPS_PROXY).toBe(
+      "http://proxy.example:8080",
+    )
+    expect(request.environment?.NPM_CONFIG_OFFLINE).toBe("false")
   })
 })

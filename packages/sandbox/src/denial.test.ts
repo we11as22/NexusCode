@@ -5,6 +5,8 @@ describe("isLikelySandboxDenied", () => {
   it.each([
     "Operation not permitted",
     "permission denied",
+    "Access is denied.",
+    "access denied",
     "Read-only file system",
     "seccomp violation",
     "sandbox_apply failed",

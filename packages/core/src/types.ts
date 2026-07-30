@@ -467,7 +467,12 @@ export interface HostSandboxCommandResult {
   stdout: string
   stderr: string
   exitCode: number
-  sandbox: "seatbelt" | "bwrap-seccomp" | "windows-restricted-token" | "none"
+  sandbox:
+    | "seatbelt"
+    | "bwrap-seccomp"
+    | "windows-elevated"
+    | "windows-restricted-token"
+    | "none"
   timedOut: boolean
   denied: boolean
   setupError?: {

@@ -9,6 +9,7 @@ const cwd = path.resolve(__dirname, '..')
 const target = `${process.platform}-${process.arch}`
 const helperName = process.platform === 'win32' ? 'nexus-sandbox.exe' : 'nexus-sandbox'
 const helperRelative = `vendor/${target}/${helperName}`
+const helperManifestRelative = `vendor/${target}/SHA256SUMS.json`
 const helperPath = path.join(cwd, helperRelative)
 const linuxCompanions = process.platform === 'linux'
   ? [
@@ -27,12 +28,22 @@ const helperVersion = execFileSync(helperPath, ['--version'], {
 if (!/^nexus-sandbox \S+ protocol=1$/u.test(helperVersion)) {
   throw new Error(`Native sandbox helper failed its version probe: ${helperVersion}`)
 }
-const helperBackend = execFileSync(helperPath, ['--check'], {
-  cwd,
-  encoding: 'utf8',
-}).trim()
-if (!/^nexus-sandbox backend=\S+ ready$/u.test(helperBackend)) {
-  throw new Error(`Native sandbox backend failed its readiness probe: ${helperBackend}`)
+if (process.platform === 'win32') {
+  const status = JSON.parse(execFileSync(helperPath, ['--status-json'], {
+    cwd,
+    encoding: 'utf8',
+  }))
+  if (!['not-installed', 'stale', 'broken', 'ready'].includes(status.state)) {
+    throw new Error(`Native Windows sandbox emitted an invalid setup state: ${status.state}`)
+  }
+} else {
+  const helperBackend = execFileSync(helperPath, ['--check'], {
+    cwd,
+    encoding: 'utf8',
+  }).trim()
+  if (!/^nexus-sandbox backend=\S+ ready$/u.test(helperBackend)) {
+    throw new Error(`Native sandbox backend failed its readiness probe: ${helperBackend}`)
+  }
 }
 
 const packageFiles = execSync(
@@ -43,6 +54,9 @@ const packageFiles = execSync(
   .map((entry) => entry.trim())
 if (!packageFiles.includes(helperRelative)) {
   throw new Error(`VSIX file list omits native sandbox helper: ${helperRelative}`)
+}
+if (!packageFiles.includes(helperManifestRelative)) {
+  throw new Error(`VSIX file list omits sandbox integrity manifest: ${helperManifestRelative}`)
 }
 for (const companion of linuxCompanions) {
   if (!packageFiles.includes(companion)) {

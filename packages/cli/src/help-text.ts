@@ -27,6 +27,7 @@ Commands:
   config                Manage configuration
   approved-tools        Manage approved tools
   mcp                   Configure MCP servers
+  sandbox               Inspect or set up the native OS sandbox
   doctor                Check installation health
 
 Run 'nexus' for interactive mode, or 'nexus "your prompt"' to run once.

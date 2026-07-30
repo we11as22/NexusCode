@@ -9,6 +9,8 @@ describe("CLI stdin policy", () => {
     ["task", "checkpoints"],
     ["approved-tools", "list"],
     ["doctor"],
+    ["sandbox", "status"],
+    ["sandbox", "setup"],
   ])("does not wait for prompt stdin for command argv %j", (...argv) => {
     expect(shouldReadPromptFromStdin(argv)).toBe(false)
   })

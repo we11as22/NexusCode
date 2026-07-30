@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process"
+import { createHash } from "node:crypto"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -157,6 +158,20 @@ function buildBundledBubblewrap(outputDir, targetValue) {
   }
 }
 
+function writeIntegrityManifest(outputDir, targetValue, files) {
+  const hashes = {}
+  for (const file of files) {
+    const source = path.join(outputDir, file)
+    hashes[file] = createHash("sha256")
+      .update(fs.readFileSync(source))
+      .digest("hex")
+  }
+  fs.writeFileSync(
+    path.join(outputDir, "SHA256SUMS.json"),
+    `${JSON.stringify({ schema: 1, target: targetValue, files: hashes }, null, 2)}\n`,
+  )
+}
+
 for (const value of targets) {
   const [platform, arch] = value.split("-")
   if (target(platform, arch) !== value) {
@@ -200,5 +215,12 @@ for (const value of targets) {
   }
   if (platform !== "win32") fs.chmodSync(output, 0o755)
   if (platform === "linux") buildBundledBubblewrap(outputDir, value)
+  writeIntegrityManifest(
+    outputDir,
+    value,
+    platform === "linux"
+      ? [binaryName, "nexus-bwrap", "COPYING.bubblewrap"]
+      : [binaryName],
+  )
   process.stdout.write(`[nexus-sandbox] built ${value}: ${output}\n`)
 }

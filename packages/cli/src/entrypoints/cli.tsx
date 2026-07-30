@@ -8,6 +8,7 @@ import React from 'react'
 import { ReadStream } from 'tty'
 import * as path from 'node:path'
 import { openSync, existsSync } from 'fs'
+import { execFileSync } from 'node:child_process'
 import { render, RenderOptions } from 'ink'
 import { REPL } from '../screens/REPL.js'
 import { addToHistory } from '../history.js'
@@ -94,6 +95,7 @@ import { resolveRuntimeMode } from '../session-selection.js'
 import { coreMcpDisplayStatuses } from '../mcp-display.js'
 import { shouldReadPromptFromStdin } from '../stdin-policy.js'
 import { collectDoctorReport } from '../doctor-report.js'
+import { resolveSandboxBinary } from '@nexuscode/sandbox'
 import {
   shouldRunMutableStartupEffects,
   type CliStartupMode,
@@ -1016,6 +1018,58 @@ ${commandList}`,
   }
 
   // Doctor command - check installation health
+  const sandbox = program
+    .command('sandbox')
+    .description('Inspect or set up the native OS sandbox')
+
+  sandbox
+    .command('status')
+    .description('Show native OS sandbox readiness')
+    .action(() => {
+      const helper = resolveSandboxBinary()
+      try {
+        const output = execFileSync(helper, ['--check'], {
+          encoding: 'utf8',
+          windowsHide: true,
+        })
+        console.log(output.trim())
+        process.exit(0)
+      } catch (error) {
+        if (process.platform === 'win32') {
+          const status = execFileSync(helper, ['--status-json'], {
+            encoding: 'utf8',
+            windowsHide: true,
+          })
+          console.error(status.trim())
+          process.exit(1)
+        }
+        throw error
+      }
+    })
+
+  sandbox
+    .command('setup')
+    .description('Provision the Windows OS sandbox (one UAC prompt)')
+    .action(() => {
+      if (process.platform !== 'win32') {
+        console.log(
+          'NexusCode provisions the native OS sandbox automatically on this platform.',
+        )
+        process.exit(0)
+      }
+      const helper = resolveSandboxBinary()
+      execFileSync(helper, ['--setup'], {
+        stdio: 'inherit',
+        windowsHide: true,
+      })
+      execFileSync(helper, ['--check'], {
+        stdio: 'inherit',
+        windowsHide: true,
+      })
+      console.log('NexusCode Windows OS sandbox is ready.')
+      process.exit(0)
+    })
+
   program
     .command('doctor')
     .description('Check the NexusCode runtime, workspace, and local tools')

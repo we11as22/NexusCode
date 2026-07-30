@@ -36,7 +36,7 @@ parent-death signal.
 | macOS arm64 | Seatbelt через фиксированный `/usr/bin/sandbox-exec` | Проверен end-to-end на текущем Mac: запись в workspace разрешена; запись вне workspace и в защищённые `.git/.nexus/.agents/.codex` запрещена; политика наследуется дочерним shell; сеть по умолчанию закрыта; явное сетевое и Unix-socket разрешение работает |
 | macOS x64 | Seatbelt | Код и cross-build готовы; реальный x64 host в этом чекпоинте не использовался |
 | Linux arm64/x64 | bundled Bubblewrap 0.11.2, seccomp, namespaces | Оба статических ELF cross-build проходят; TypeScript policy/protocol покрыты тестами. Реальный Linux host ещё не прогнан, поэтому production parity не заявляется |
-| Windows arm64/x64 | restricted token/job object | PE helper cross-build проходит, но backend пока намеренно возвращает ошибку. Installer и runtime fail closed; скрытого unsandboxed fallback нет |
+| Windows arm64/x64 | отдельные offline/online identities, capability ACL, restricted token, private desktop, handle allow-list, Job Object, user-scoped Windows Firewall | Backend реализован и PE helper cross-build проходит для обеих архитектур. Windows 2022 workflow содержит setup/check и безопасный smoke workspace/outside write, write→read-only, protected/denied roots, offline/online network и kill всего process tree. Реальный результат workflow ещё нужен; скрытого unsandboxed fallback нет |
 
 ## Интеграция UI
 
@@ -61,21 +61,22 @@ NexusCode.
 
 ## Проверки этого чекпоинта
 
-- полный monorepo test: 1895 passed, 2 host-native skipped в обычном вложенном
+- полный monorepo test: 1902 passed, 2 host-native skipped в обычном вложенном
   sandbox-прогоне;
 - VS Code: 260/260;
 - core: 1115/1115;
-- CLI: 176 passed, 2 skipped; native CLI smoke отдельно прошёл;
+- CLI: 178 passed, 2 skipped; native CLI smoke отдельно прошёл;
 - server: 105/105;
 - webview: 84/84;
 - state: 119/119;
-- sandbox: 36/36;
+- sandbox: 41/41;
 - runtime/installer/storage: 13/13;
 - typecheck: все семь исполняемых workspace-пакетов;
-- deterministic feature census: 243 функции, проверка актуальности прошла;
+- deterministic feature census: 247 функций, проверка актуальности прошла;
 - MCP/skills workflow: OK;
 - production build: OK;
-- VSIX: 169 файлов, 13.44 MB, `vendor/darwin-arm64/nexus-sandbox` присутствует;
+- VSIX: 170 файлов, 13.44 MB, `vendor/darwin-arm64/nexus-sandbox` и
+  `SHA256SUMS` присутствуют;
 - one-command installer: dependency install, CLI build/install, extension
   build/package/install и `doctor` прошли;
 - финальный `nexus doctor --cwd /Users/mac/Projects/nexus/test` вне вложенной
@@ -84,8 +85,9 @@ NexusCode.
 ## Что ещё нельзя назвать готовым паритетом
 
 1. Нужен реальный Linux host E2E, хотя policy, протокол и cross-build зелёные.
-2. Нужен настоящий Windows restricted-token/job-object backend; текущий
-   fail-closed результат безопасен, но это не поддержка исполнения.
+2. Нужен зелёный прогон добавленного workflow на настоящем Windows runner.
+   Реализация backend и smoke suite готовы, но macOS cross-build не является
+   доказательством Windows runtime.
 3. Доверенный JavaScript plugin worker изолирован процессом и capability
    проверками, однако ещё не помещён в отдельный kernel sandbox с полностью
    декларативным ABI.

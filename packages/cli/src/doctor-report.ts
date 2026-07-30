@@ -54,13 +54,30 @@ const defaultDependencies: DoctorDependencies = {
         execFileNoThrow(binary, ["--check"]),
       ])
       if (version.code !== 0 || backend.code !== 0) {
+        let detail =
+          backend.stderr ||
+          version.stderr ||
+          `helper/backend exited ${version.code}/${backend.code}`
+        if (process.platform === "win32") {
+          const status = await execFileNoThrow(binary, ["--status-json"])
+          if (status.code === 0) {
+            try {
+              const parsed = JSON.parse(status.stdout) as {
+                state?: string
+                detail?: string
+              }
+              if (parsed.state) {
+                detail = `${parsed.state}: ${parsed.detail ?? "run `nexus sandbox setup`"}`
+              }
+            } catch {
+              // Preserve the original readiness error when status is malformed.
+            }
+          }
+        }
         return {
           available: false,
           target,
-          error:
-            backend.stderr ||
-            version.stderr ||
-            `helper/backend exited ${version.code}/${backend.code}`,
+          error: detail,
         }
       }
       return {

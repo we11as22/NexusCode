@@ -1,11 +1,16 @@
 import * as vscode from "vscode"
+import { execFile } from "node:child_process"
+import { promisify } from "node:util"
+import { resolveSandboxBinary } from "@nexuscode/sandbox"
 import { NexusProvider } from "./provider.js"
 
 let provider: NexusProvider | undefined
+const execFileAsync = promisify(execFile)
 
 export function activate(context: vscode.ExtensionContext): void {
   provider = new NexusProvider(context)
   provider.warmup()
+  void offerWindowsSandboxSetup()
 
   // Register sidebar view provider
   context.subscriptions.push(
@@ -149,7 +154,45 @@ export function activate(context: vscode.ExtensionContext): void {
       const existing = vscode.window.terminals.find((t) => t.name === "NexusCode")
       const term = existing ?? vscode.window.createTerminal({ name: "NexusCode", cwd })
       term.show()
-    })
+    }),
+
+    vscode.commands.registerCommand("nexuscode.setupWindowsSandbox", async () => {
+      if (process.platform !== "win32") {
+        await vscode.window.showInformationMessage(
+          "NexusCode: Explicit OS sandbox setup is only required on Windows.",
+        )
+        return
+      }
+      try {
+        const helper = resolveSandboxBinary()
+        await vscode.window.withProgress(
+          {
+            location: vscode.ProgressLocation.Notification,
+            title: "NexusCode: Configuring Windows sandbox…",
+            cancellable: false,
+          },
+          async () => {
+            await execFileAsync(helper, ["--setup"], {
+              windowsHide: true,
+              maxBuffer: 1024 * 1024,
+            })
+            await execFileAsync(helper, ["--check"], {
+              windowsHide: true,
+              maxBuffer: 1024 * 1024,
+            })
+          },
+        )
+        await vscode.window.showInformationMessage(
+          "NexusCode: Windows sandbox is ready.",
+        )
+      } catch (error) {
+        await vscode.window.showErrorMessage(
+          `NexusCode: Windows sandbox setup failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        )
+      }
+    }),
   )
 }
 
@@ -190,4 +233,44 @@ function getDiagnosticsString(uri: vscode.Uri): string {
       return `- [${severity}] ${range}: ${d.message}`
     })
     .join("\n")
+}
+
+async function offerWindowsSandboxSetup(): Promise<void> {
+  if (process.platform !== "win32") return
+  try {
+    const helper = resolveSandboxBinary()
+    const { stdout } = await execFileAsync(helper, ["--status-json"], {
+      windowsHide: true,
+      maxBuffer: 64 * 1024,
+    })
+    const status = JSON.parse(stdout) as { state?: string; detail?: string }
+    if (status.state === "ready") {
+      try {
+        await execFileAsync(helper, ["--check"], {
+          windowsHide: true,
+          maxBuffer: 1024 * 1024,
+        })
+        return
+      } catch (error) {
+        status.detail =
+          `The saved setup is present but its security probe failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+      }
+    }
+    const action = await vscode.window.showWarningMessage(
+      `NexusCode: Windows OS sandbox is ${status.state ?? "not ready"}. ` +
+        `${status.detail ?? "Setup is required before agent commands can run."}`,
+      "Set up sandbox",
+    )
+    if (action === "Set up sandbox") {
+      await vscode.commands.executeCommand("nexuscode.setupWindowsSandbox")
+    }
+  } catch (error) {
+    void vscode.window.showErrorMessage(
+      `NexusCode: Could not inspect the Windows sandbox: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    )
+  }
 }

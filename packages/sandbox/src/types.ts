@@ -5,6 +5,7 @@ export type SandboxProfile = "read-only" | "workspace-write"
 export type SandboxKind =
   | "seatbelt"
   | "bwrap-seccomp"
+  | "windows-elevated"
   | "windows-restricted-token"
   | "none"
 

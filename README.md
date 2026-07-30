@@ -60,10 +60,10 @@ loaded. From the repository root:
 ./install.sh
 ```
 
-On macOS, `install.command` can also be launched with a double click. A
-Windows launcher (`install.cmd`) is present, but the current Windows native
-sandbox backend intentionally fails closed and therefore the final installer
-verification will not report a usable agent shell there yet.
+On macOS, `install.command` can also be launched with a double click. On
+Windows, `install.cmd` performs the same build and installation and shows one
+UAC confirmation while it provisions the two private sandbox identities and
+their offline firewall policy.
 
 That one action incrementally installs dependencies, builds the shared core,
 CLI and extension, bundles and verifies the current-platform OS sandbox and
@@ -78,7 +78,7 @@ store.
 | --- | --- | --- |
 | macOS arm64/x64 | Seatbelt via the fixed `/usr/bin/sandbox-exec` path | arm64 is built, packaged, and exercised on a real host: workspace writes succeed; writes outside the workspace and to protected runtime metadata are denied; restricted network and Unix-socket rules are enforced |
 | Linux arm64/x64 | bundled Bubblewrap plus seccomp and process hardening | both architectures cross-build successfully and the policy/protocol layers are covered by tests; a real Linux host run is still required before claiming production parity |
-| Windows arm64/x64 | restricted token/job object | not implemented yet; the helper and installer fail closed instead of silently running model commands without isolation |
+| Windows arm64/x64 | dedicated offline/online identities, capability ACLs, restricted primary token, private desktop, explicit handle list, nested kill-on-close Job Objects, user-scoped Windows Firewall policy | implementation and PE cross-build are complete for x64/arm64; a Windows 2022 CI smoke suite exercises workspace/outside writes, write→read-only authority, protected/denied roots, offline/online networking and process-tree termination. A real Windows run must pass before runtime parity is claimed |
 
 CLI, server, background commands, plugin hooks, and the VS Code host all use
 the same Nexus-owned broker contract. An ordinary command approval authorizes
@@ -131,6 +131,13 @@ the source checkout. If that Node binary moves after an nvm change, run
 `./install.sh` again. `nexus doctor` reports whether search uses a system or
 bundled ripgrep runtime and verifies that the native OS-sandbox backend is
 actually ready.
+
+On Windows, repair or inspect the native boundary independently with:
+
+```powershell
+nexus sandbox setup
+nexus sandbox status
+```
 
 ---
 

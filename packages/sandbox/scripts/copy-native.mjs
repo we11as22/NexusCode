@@ -34,6 +34,10 @@ for (const target of targets) {
   fs.mkdirSync(path.dirname(destination), { recursive: true })
   fs.copyFileSync(source, destination)
   if (!target.startsWith("win32-")) fs.chmodSync(destination, 0o755)
+  fs.copyFileSync(
+    path.join(sandboxRoot, "vendor", target, "SHA256SUMS.json"),
+    path.join(destinationRoot, "vendor", target, "SHA256SUMS.json"),
+  )
   if (target.startsWith("linux-")) {
     for (const file of ["nexus-bwrap", "COPYING.bubblewrap"]) {
       const companionSource = path.join(

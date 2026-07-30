@@ -44,12 +44,30 @@ export function createSandboxRequest(
     pathApi,
     "temp directory",
   )
+  const environment = buildCommandEnvironment(
+    process.env,
+    input.environment,
+    platform,
+  )
+  const windowsComSpec =
+    platform === "win32"
+      ? normalizeAbsolute(
+          input.windowsComSpec ?? "C:\\Windows\\System32\\cmd.exe",
+          path.win32,
+          "Windows command shell",
+        )
+      : undefined
   const readableRoots =
     platform === "win32"
       ? uniquePaths(
-          [cwd, ...workspaceRoots, ...protectedRoots, tempDir]
-            .map((root) => path.win32.parse(root).root)
-            .filter(Boolean),
+          [
+            cwd,
+            ...workspaceRoots,
+            ...protectedRoots,
+            tempDir,
+            path.win32.dirname(windowsComSpec!),
+            ...windowsRuntimeRoots(environment),
+          ],
           platform,
         )
       : ["/"]
@@ -73,22 +91,13 @@ export function createSandboxRequest(
   const argv =
     platform === "win32"
       ? [
-          normalizeAbsolute(
-            input.windowsComSpec ?? "C:\\Windows\\System32\\cmd.exe",
-            path.win32,
-            "Windows command shell",
-          ),
+          windowsComSpec!,
           "/d",
           "/s",
           "/c",
           input.command,
         ]
       : ["/bin/sh", "-c", input.command]
-  const environment = buildCommandEnvironment(
-    process.env,
-    input.environment,
-    platform,
-  )
   setEnvironmentValue(environment, "TMPDIR", tempDir, platform)
   setEnvironmentValue(environment, "TMP", tempDir, platform)
   setEnvironmentValue(environment, "TEMP", tempDir, platform)
@@ -100,6 +109,7 @@ export function createSandboxRequest(
       "1",
       platform,
     )
+    applyRestrictedNetworkEnvironment(environment, platform)
   } else {
     deleteEnvironmentValue(
       environment,
@@ -126,6 +136,78 @@ export function createSandboxRequest(
     environment,
     allowUnixSockets: input.allowUnixSockets ?? [],
   }
+}
+
+function applyRestrictedNetworkEnvironment(
+  environment: Record<string, string>,
+  platform: NodeJS.Platform,
+): void {
+  // These settings are defense in depth and improve fail-fast behavior for
+  // package managers. The native Seatbelt/Landlock/firewall boundary remains
+  // authoritative even when a child ignores every environment variable.
+  const loopbackSink = "http://127.0.0.1:9"
+  for (const key of [
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "GIT_HTTP_PROXY",
+    "GIT_HTTPS_PROXY",
+  ]) {
+    setEnvironmentValue(environment, key, loopbackSink, platform)
+  }
+  for (const [key, value] of Object.entries({
+    NO_PROXY: "",
+    PIP_NO_INDEX: "1",
+    PIP_DISABLE_PIP_VERSION_CHECK: "1",
+    NPM_CONFIG_OFFLINE: "true",
+    CARGO_NET_OFFLINE: "true",
+    GIT_SSH_COMMAND:
+      platform === "win32"
+        ? "cmd.exe /d /s /c exit 1"
+        : "/usr/bin/false",
+  })) {
+    setEnvironmentValue(environment, key, value, platform)
+  }
+}
+
+function windowsRuntimeRoots(environment: Record<string, string>): string[] {
+  const roots: string[] = []
+  const addAbsolute = (candidate: string | undefined): void => {
+    if (
+      candidate &&
+      !candidate.includes("\0") &&
+      path.win32.isAbsolute(candidate)
+    ) {
+      roots.push(path.win32.normalize(candidate))
+    }
+  }
+
+  for (const key of [
+    "SystemRoot",
+    "ProgramFiles",
+    "ProgramFiles(x86)",
+    "ProgramData",
+    "NVM_HOME",
+    "NVM_SYMLINK",
+    "PNPM_HOME",
+  ]) {
+    const actual = findEnvironmentKey(environment, key, "win32")
+    addAbsolute(actual === undefined ? undefined : environment[actual])
+  }
+
+  const appDataKey = findEnvironmentKey(environment, "APPDATA", "win32")
+  if (appDataKey !== undefined) {
+    const appData = environment[appDataKey]
+    if (appData) addAbsolute(path.win32.join(appData, "npm"))
+  }
+
+  const pathKey = findEnvironmentKey(environment, "PATH", "win32")
+  if (pathKey !== undefined) {
+    for (const entry of (environment[pathKey] ?? "").split(";")) {
+      addAbsolute(entry.trim())
+    }
+  }
+  return roots
 }
 
 function buildCommandEnvironment(

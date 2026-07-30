@@ -1,5 +1,6 @@
 import * as fs from "node:fs"
 import * as path from "node:path"
+import { createHash } from "node:crypto"
 import { fileURLToPath } from "node:url"
 
 export interface ResolveSandboxBinaryOptions {
@@ -60,6 +61,13 @@ export function resolveSandboxBinary(
       unsafeError = new Error(`Nexus sandbox helper is not executable: ${resolved}`)
       continue
     }
+    try {
+      verifyIntegrity(path.dirname(resolved), target, binaryName, resolved)
+    } catch (error) {
+      unsafeError =
+        error instanceof Error ? error : new Error(String(error))
+      continue
+    }
     return resolved
   }
 
@@ -67,6 +75,58 @@ export function resolveSandboxBinary(
   throw new Error(
     `Nexus sandbox helper is unavailable for ${platform}/${arch}; reinstall or rebuild NexusCode`,
   )
+}
+
+function verifyIntegrity(
+  directory: string,
+  target: string,
+  binaryName: string,
+  binaryPath: string,
+): void {
+  const manifestPath = path.join(directory, "SHA256SUMS.json")
+  let manifest: unknown
+  try {
+    manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"))
+  } catch (error) {
+    throw new Error(
+      `Nexus sandbox integrity manifest is unavailable: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    )
+  }
+  if (
+    !manifest ||
+    typeof manifest !== "object" ||
+    (manifest as { schema?: unknown }).schema !== 1 ||
+    (manifest as { target?: unknown }).target !== target
+  ) {
+    throw new Error("Nexus sandbox integrity manifest has an invalid schema or target")
+  }
+  const files = (manifest as { files?: Record<string, unknown> }).files
+  const expected = files?.[binaryName]
+  if (
+    !files ||
+    typeof expected !== "string" ||
+    !/^[a-f0-9]{64}$/u.test(expected)
+  ) {
+    throw new Error(`Nexus sandbox integrity manifest omits ${binaryName}`)
+  }
+  for (const [file, digest] of Object.entries(files)) {
+    if (
+      file !== path.basename(file) ||
+      typeof digest !== "string" ||
+      !/^[a-f0-9]{64}$/u.test(digest)
+    ) {
+      throw new Error("Nexus sandbox integrity manifest contains an unsafe file entry")
+    }
+    const candidate = file === binaryName ? binaryPath : path.join(directory, file)
+    const actual = createHash("sha256")
+      .update(fs.readFileSync(candidate))
+      .digest("hex")
+    if (actual !== digest) {
+      throw new Error(`Nexus sandbox integrity check failed for ${file}`)
+    }
+  }
 }
 
 export function defaultSandboxTrustedRoots(): string[] {

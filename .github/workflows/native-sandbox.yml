@@ -1,0 +1,76 @@
+name: Native sandbox
+
+on:
+  push:
+    paths:
+      - "native/sandbox/**"
+      - "packages/sandbox/**"
+      - "packages/cli/**"
+      - "packages/vscode/**"
+      - "scripts/one-install.js"
+      - "scripts/windows-sandbox-smoke.mjs"
+      - ".github/workflows/native-sandbox.yml"
+  pull_request:
+    paths:
+      - "native/sandbox/**"
+      - "packages/sandbox/**"
+      - "packages/cli/**"
+      - "packages/vscode/**"
+      - "scripts/one-install.js"
+      - "scripts/windows-sandbox-smoke.mjs"
+      - ".github/workflows/native-sandbox.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: "pnpm"
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: "native/sandbox/go.mod"
+          cache-dependency-path: "native/sandbox/go.mod"
+      - name: Enable repository package manager
+        run: corepack enable
+      - name: Install JavaScript dependencies
+        run: corepack pnpm install --frozen-lockfile
+      - name: Test Go policy model
+        working-directory: native/sandbox
+        run: go test ./...
+      - name: Test shared sandbox protocol
+        run: corepack pnpm --filter @nexuscode/sandbox test
+      - name: Typecheck Windows host integrations
+        run: |
+          corepack pnpm --filter @nexuscode/sandbox typecheck
+          corepack pnpm --filter @nexuscode/cli typecheck
+          corepack pnpm --dir packages/vscode typecheck
+      - name: Build Windows sandbox helper
+        env:
+          NEXUS_SANDBOX_TARGETS: win32-x64,win32-arm64
+        run: corepack pnpm --filter @nexuscode/sandbox build:native
+      - name: Provision Windows sandbox identities and policy
+        run: packages\sandbox\vendor\win32-x64\nexus-sandbox.exe --setup-elevated
+      - name: Verify Windows sandbox setup
+        run: packages\sandbox\vendor\win32-x64\nexus-sandbox.exe --check
+      - name: Exercise Windows security boundaries
+        env:
+          NEXUS_SANDBOX_HELPER: packages\sandbox\vendor\win32-x64\nexus-sandbox.exe
+        run: node scripts/windows-sandbox-smoke.mjs
+      - name: Preserve Windows helpers for release inspection
+        uses: actions/upload-artifact@v4
+        with:
+          name: nexus-sandbox-windows
+          path: |
+            packages/sandbox/vendor/win32-x64/nexus-sandbox.exe
+            packages/sandbox/vendor/win32-x64/SHA256SUMS.json
+            packages/sandbox/vendor/win32-arm64/nexus-sandbox.exe
+            packages/sandbox/vendor/win32-arm64/SHA256SUMS.json
+          if-no-files-found: error

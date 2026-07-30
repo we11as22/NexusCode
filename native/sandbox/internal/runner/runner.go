@@ -16,6 +16,21 @@ type Command struct {
 	Program string
 	Args    []string
 	Sandbox string
+	Start   StartFunc
+}
+
+type StartFunc func(
+	context.Context,
+	protocol.Request,
+	io.Writer,
+	io.Writer,
+) (Process, error)
+
+type Process interface {
+	Wait() error
+	Terminate()
+	Kill()
+	ExitCode(error) int
 }
 
 type Result struct {
@@ -39,7 +54,7 @@ func Run(
 		})
 		return Result{ExitCode: 1, SetupError: err}
 	}
-	if command.Program == "" {
+	if command.Program == "" && command.Start == nil {
 		err := errors.New("sandbox command program is empty")
 		writeControl(control, protocol.ControlMessage{
 			Version: protocol.ProtocolVersion, Type: protocol.ControlError,
@@ -55,14 +70,8 @@ func Run(
 	}
 	defer cancel()
 
-	cmd := exec.Command(command.Program, command.Args...)
-	cmd.Dir = request.Cwd
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	cmd.Env = buildEnvironment(request)
-	prepareProcess(cmd)
-
-	if err := cmd.Start(); err != nil {
+	process, err := startProcess(ctx, request, command, stdout, stderr)
+	if err != nil {
 		writeControl(control, protocol.ControlMessage{
 			Version: protocol.ProtocolVersion, Type: protocol.ControlError,
 			ExecutionID: request.ExecutionID, Sandbox: command.Sandbox,
@@ -76,7 +85,7 @@ func Run(
 	})
 
 	waited := make(chan error, 1)
-	go func() { waited <- cmd.Wait() }()
+	go func() { waited <- process.Wait() }()
 
 	var waitErr error
 	timedOut := false
@@ -84,22 +93,64 @@ func Run(
 	case waitErr = <-waited:
 	case <-ctx.Done():
 		timedOut = errors.Is(ctx.Err(), context.DeadlineExceeded)
-		terminateProcessTree(cmd)
+		process.Terminate()
 		select {
 		case waitErr = <-waited:
 		case <-time.After(500 * time.Millisecond):
-			killProcessTree(cmd)
+			process.Kill()
 			waitErr = <-waited
 		}
 	}
 
-	exitCode := exitCodeOf(cmd, waitErr)
+	exitCode := process.ExitCode(waitErr)
 	writeControl(control, protocol.ControlMessage{
 		Version: protocol.ProtocolVersion, Type: protocol.ControlExited,
 		ExecutionID: request.ExecutionID, Sandbox: command.Sandbox,
 		ExitCode: &exitCode, TimedOut: timedOut,
 	})
 	return Result{ExitCode: exitCode, TimedOut: timedOut}
+}
+
+func startProcess(
+	ctx context.Context,
+	request protocol.Request,
+	command Command,
+	stdout io.Writer,
+	stderr io.Writer,
+) (Process, error) {
+	if command.Start != nil {
+		return command.Start(ctx, request, stdout, stderr)
+	}
+	cmd := exec.Command(command.Program, command.Args...)
+	cmd.Dir = request.Cwd
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	cmd.Env = buildEnvironment(request)
+	prepareProcess(cmd)
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	return &execProcess{cmd: cmd}, nil
+}
+
+type execProcess struct {
+	cmd *exec.Cmd
+}
+
+func (process *execProcess) Wait() error {
+	return process.cmd.Wait()
+}
+
+func (process *execProcess) Terminate() {
+	terminateProcessTree(process.cmd)
+}
+
+func (process *execProcess) Kill() {
+	killProcessTree(process.cmd)
+}
+
+func (process *execProcess) ExitCode(waitErr error) int {
+	return exitCodeOf(process.cmd, waitErr)
 }
 
 func buildEnvironment(request protocol.Request) []string {

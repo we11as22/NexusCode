@@ -3,6 +3,8 @@ import type { SandboxKind } from "./types.js"
 const DENIED_KEYWORDS = [
   "operation not permitted",
   "permission denied",
+  "access is denied",
+  "access denied",
   "read-only file system",
   "seccomp",
   "sandbox",

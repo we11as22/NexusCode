@@ -6,6 +6,7 @@ const TOP_LEVEL_COMMANDS = new Set([
   "error",
   "log",
   "mcp",
+  "sandbox",
   "task",
   "update",
 ])

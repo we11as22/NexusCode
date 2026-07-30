@@ -36,28 +36,49 @@ function nodeVersion(candidate) {
 
 function findPinnedNode(required) {
   const executable = process.platform === "win32" ? "node.exe" : "node"
+  const nvmVersioned =
+    process.platform === "win32"
+      ? [
+          process.env.NVM_SYMLINK
+            ? path.join(process.env.NVM_SYMLINK, executable)
+            : null,
+          process.env.NVM_HOME
+            ? path.join(process.env.NVM_HOME, `v${required}`, executable)
+            : null,
+          path.join(
+            os.homedir(),
+            ".fnm",
+            "node-versions",
+            `v${required}`,
+            "installation",
+            executable,
+          ),
+        ]
+      : [
+          process.env.NVM_DIR
+            ? path.join(
+                process.env.NVM_DIR,
+                "versions",
+                "node",
+                `v${required}`,
+                "bin",
+                executable,
+              )
+            : null,
+          path.join(
+            os.homedir(),
+            ".nvm",
+            "versions",
+            "node",
+            `v${required}`,
+            "bin",
+            executable,
+          ),
+        ]
   const candidates = [
     process.env.NEXUS_NODE,
     process.execPath,
-    process.env.NVM_DIR
-      ? path.join(
-          process.env.NVM_DIR,
-          "versions",
-          "node",
-          `v${required}`,
-          "bin",
-          executable,
-        )
-      : null,
-    path.join(
-      os.homedir(),
-      ".nvm",
-      "versions",
-      "node",
-      `v${required}`,
-      "bin",
-      executable,
-    ),
+    ...nvmVersioned,
     path.join(os.homedir(), ".volta", "bin", executable),
     "node",
     "nodejs",
@@ -73,7 +94,9 @@ if (process.versions.node !== requiredNode) {
       `NexusCode requires Node.js ${requiredNode}; current runtime is ${process.versions.node}.`,
     )
     console.error(
-      `Install it once (for nvm: source "$HOME/.nvm/nvm.sh" && nvm install ${requiredNode}) and rerun this same command.`,
+      process.platform === "win32"
+        ? `Install it once (for nvm-windows: nvm install ${requiredNode} && nvm use ${requiredNode}) and rerun this same command.`
+        : `Install it once (for nvm: source "$HOME/.nvm/nvm.sh" && nvm install ${requiredNode}) and rerun this same command.`,
     )
     process.exit(1)
   }
@@ -301,6 +324,7 @@ function installRuntime() {
   return {
     root: runtime,
     cliEntry: path.join(runtime, "dist", "index.js"),
+    sandboxHelper: path.join(runtime, "vendor", target, helperName),
   }
 }
 
@@ -357,6 +381,10 @@ console.log("[5/7] Installing an isolated CLI runtime...")
 const runtime = installRuntime()
 console.log("[6/7] Installing local launchers and editor extension...")
 const wrapper = installCliWrapper(runtime.cliEntry)
+if (process.platform === "win32") {
+  console.log("Configuring the Windows OS sandbox (one UAC confirmation may appear)...")
+  run(runtime.sandboxHelper, ["--setup"])
+}
 const vscodePackage = require(path.join(root, "packages", "vscode", "package.json"))
 const vsix = path.join(
   root,

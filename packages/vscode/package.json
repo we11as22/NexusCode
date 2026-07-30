@@ -147,6 +147,11 @@
         "icon": "$(terminal)"
       },
       {
+        "command": "nexuscode.setupWindowsSandbox",
+        "title": "Set Up Windows OS Sandbox",
+        "category": "NexusCode"
+      },
+      {
         "command": "nexuscode.autocomplete.generateSuggestions",
         "title": "NexusCode: Generate Inline Completion",
         "category": "NexusCode"

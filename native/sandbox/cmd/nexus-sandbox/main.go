@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/we11as22/NexusCode/native/sandbox/internal/app"
@@ -26,6 +27,9 @@ func main() {
 	if tryRunPlatformInner() {
 		return
 	}
+	if len(os.Args) == 3 && os.Args[1] == "--windows-command-runner" {
+		os.Exit(runWindowsCommandRunner(os.Args[2]))
+	}
 	if len(os.Args) == 2 && os.Args[1] == "--version" {
 		fmt.Printf("nexus-sandbox %s protocol=%d\n", version, protocol.ProtocolVersion)
 		return
@@ -34,8 +38,22 @@ func main() {
 		checkBackend()
 		return
 	}
+	if len(os.Args) == 2 && os.Args[1] == "--status-json" {
+		if err := writePlatformStatus(os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "sandbox status failed: %v\n", err)
+			os.Exit(125)
+		}
+		return
+	}
+	if len(os.Args) == 2 && (os.Args[1] == "--setup" || os.Args[1] == "--setup-elevated") {
+		if err := runPlatformSetup(os.Args[1] == "--setup-elevated"); err != nil {
+			fmt.Fprintf(os.Stderr, "sandbox setup failed: %v\n", err)
+			os.Exit(125)
+		}
+		return
+	}
 	if len(os.Args) != 1 {
-		fmt.Fprintln(os.Stderr, "usage: nexus-sandbox [--version|--check]")
+		fmt.Fprintln(os.Stderr, "usage: nexus-sandbox [--version|--check|--status-json|--setup]")
 		os.Exit(125)
 	}
 
@@ -60,6 +78,7 @@ func main() {
 				Program: command.Program,
 				Args:    command.Args,
 				Sandbox: command.Sandbox,
+				Start:   command.Start,
 			}, nil
 		},
 	)
@@ -71,6 +90,10 @@ func main() {
 // command. Installers and `nexus doctor` use this to avoid treating a
 // version-printing but fail-closed helper as operational.
 func checkBackend() {
+	if err := verifyPlatformInstallation(); err != nil {
+		fmt.Fprintf(os.Stderr, "sandbox backend unavailable: %v\n", err)
+		os.Exit(125)
+	}
 	executable, err := os.Executable()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "sandbox backend unavailable: %v\n", err)
@@ -86,16 +109,19 @@ func checkBackend() {
 		fmt.Fprintf(os.Stderr, "sandbox backend unavailable: %v\n", err)
 		os.Exit(125)
 	}
-	readableRoot := string(filepath.Separator)
-	if volume := filepath.VolumeName(cwd); volume != "" {
-		readableRoot = volume + string(filepath.Separator)
+	readableRoots := []string{string(filepath.Separator)}
+	if runtime.GOOS == "windows" {
+		// Never probe the Windows backend by granting authority on an entire
+		// drive. The command only needs its working directory and helper
+		// installation directory.
+		readableRoots = []string{cwd, filepath.Dir(executable)}
 	}
 	request := protocol.Request{
 		Version:       protocol.ProtocolVersion,
 		ExecutionID:   "nexus-sandbox-check",
 		Argv:          []string{executable, "--version"},
 		Cwd:           cwd,
-		ReadableRoots: []string{readableRoot},
+		ReadableRoots: readableRoots,
 		Network:       protocol.NetworkRestricted,
 		TimeoutMillis: 5_000,
 		Environment:   map[string]string{},
@@ -114,6 +140,7 @@ func checkBackend() {
 			Program: command.Program,
 			Args:    command.Args,
 			Sandbox: command.Sandbox,
+			Start:   command.Start,
 		},
 		&stdout,
 		&stderr,

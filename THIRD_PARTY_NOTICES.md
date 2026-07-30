@@ -15,3 +15,20 @@ License version 2; the complete license text is included as
 Linux binary as `COPYING.bubblewrap`.
 
 Upstream project: <https://github.com/containers/bubblewrap>
+
+## OpenAI Codex Windows sandbox
+
+The NexusCode Windows sandbox security architecture and selected low-level
+process, token, ACL, desktop, job-object, user-isolation, and firewall patterns
+are adapted from the Apache License 2.0 `windows-sandbox-rs` implementation in
+OpenAI Codex, source revision
+`61a44880a85d2fd0d8770908dea5733495e571c8`.
+
+NexusCode uses its own Go implementation, protocol, identities, state layout,
+packaging, diagnostics, and product integration. It does not bundle or invoke a
+Codex executable.
+
+Upstream project: <https://github.com/openai/codex>
+
+License: Apache License 2.0,
+<https://www.apache.org/licenses/LICENSE-2.0>

@@ -1,6 +1,7 @@
 import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
+import { createHash } from "node:crypto"
 import { afterEach, describe, expect, it } from "vitest"
 import { resolveSandboxBinary, sandboxTarget } from "./locator.js"
 
@@ -20,6 +21,16 @@ function fixture(platform: NodeJS.Platform = process.platform, arch = process.ar
   const binary = path.join(root, "vendor", target, binaryName)
   fs.mkdirSync(path.dirname(binary), { recursive: true })
   fs.writeFileSync(binary, "fixture", { mode: 0o700 })
+  fs.writeFileSync(
+    path.join(path.dirname(binary), "SHA256SUMS.json"),
+    JSON.stringify({
+      schema: 1,
+      target,
+      files: {
+        [binaryName]: createHash("sha256").update("fixture").digest("hex"),
+      },
+    }),
+  )
   return { root, binary }
 }
 
@@ -54,6 +65,34 @@ describe("resolveSandboxBinary", () => {
     roots.push(root)
     expect(() => resolveSandboxBinary({ trustedRoots: [root] })).toThrow(
       /unavailable/i,
+    )
+  })
+
+  it("rejects a helper whose bytes do not match the release manifest", () => {
+    const { root, binary } = fixture()
+    fs.appendFileSync(binary, "tampered")
+    expect(() => resolveSandboxBinary({ trustedRoots: [root] })).toThrow(
+      /integrity/i,
+    )
+  })
+
+  it("verifies every native companion listed by the release manifest", () => {
+    const { root, binary } = fixture()
+    const directory = path.dirname(binary)
+    const companion = path.join(directory, "nexus-bwrap")
+    fs.writeFileSync(companion, "trusted companion", { mode: 0o700 })
+    const manifestPath = path.join(directory, "SHA256SUMS.json")
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as {
+      files: Record<string, string>
+    }
+    manifest.files["nexus-bwrap"] = createHash("sha256")
+      .update("trusted companion")
+      .digest("hex")
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest))
+    fs.appendFileSync(companion, "tampered")
+
+    expect(() => resolveSandboxBinary({ trustedRoots: [root] })).toThrow(
+      /nexus-bwrap/u,
     )
   })
 
