@@ -121,6 +121,9 @@ func VerifyInstallation() error {
 	if err := verifyFirewallPolicy(); err != nil {
 		return fmt.Errorf("Windows sandbox network policy is unavailable: %w", err)
 	}
+	if err := verifyOfflineWFPFilters(); err != nil {
+		return fmt.Errorf("Windows sandbox WFP policy is unavailable: %w", err)
+	}
 	return nil
 }
 
@@ -300,6 +303,9 @@ func SetupElevated() error {
 	}
 	if err := verifyFirewallPolicyForSID(offlineSID); err != nil {
 		return fmt.Errorf("verify offline Windows Firewall policy: %w", err)
+	}
+	if err := installOfflineWFPFilters(offlineSID); err != nil {
+		return fmt.Errorf("install offline Windows WFP policy: %w", err)
 	}
 	credentialJSON, err := json.Marshal(credentials{
 		OfflinePassword: offlinePassword,

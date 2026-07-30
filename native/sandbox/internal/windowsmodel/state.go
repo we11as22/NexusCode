@@ -11,7 +11,7 @@ import (
 const (
 	CurrentSetupVersion        = 3
 	CurrentCredentialsRevision = 1
-	CurrentFirewallRevision    = 2
+	CurrentFirewallRevision    = 3
 )
 
 type SetupState string
