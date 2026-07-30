@@ -14,7 +14,7 @@
     }
   },
   "scripts": {
-    "build": "corepack pnpm --filter @nexuscode/sandbox build && node ../sandbox/scripts/copy-native.mjs . && tsup src/index.ts src/cli.ts --format esm --dts --target node24 --outDir dist",
+    "build": "node ../sandbox/scripts/copy-native.mjs . && tsup src/index.ts src/cli.ts --format esm --dts --target node24 --outDir dist",
     "dev": "tsup src/index.ts --format esm --dts --target node24 --outDir dist --watch",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"

@@ -28,7 +28,7 @@
   "main": "./dist/extension.js",
   "scripts": {
     "build": "corepack pnpm build:ext && corepack pnpm build:webview",
-    "build:ext": "corepack pnpm --filter @nexuscode/sandbox build && node ../sandbox/scripts/copy-native.mjs . && node esbuild.mjs",
+    "build:ext": "node ../sandbox/scripts/copy-native.mjs . && node esbuild.mjs",
     "build:webview": "corepack pnpm --filter @nexuscode/webview-ui build",
     "package": "node scripts/svg-to-png.cjs && node scripts/package-vsix.cjs",
     "dev": "node esbuild.mjs --watch",

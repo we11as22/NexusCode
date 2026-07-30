@@ -41,12 +41,14 @@ const programData = process.env.ProgramData ?? "C:\\ProgramData"
 const comSpec =
   process.env.ComSpec ?? path.join(systemRoot, "System32", "cmd.exe")
 const powershell = path.join(
-  systemRoot,
-  "System32",
-  "WindowsPowerShell",
-  "v1.0",
-  "powershell.exe",
+  programFiles,
+  "PowerShell",
+  "7",
+  "pwsh.exe",
 )
+if (!fs.existsSync(powershell)) {
+  throw new Error(`PowerShell 7 runtime not found: ${powershell}`)
+}
 
 function request(
   argv,
@@ -101,13 +103,20 @@ function request(
 }
 
 function runSandbox(payload) {
+  // Native ACL preparation is deliberately outside the command execution
+  // budget. Keep an independent bounded harness watchdog with enough headroom
+  // for cold Windows account/token startup while still failing a hung broker.
+  const harnessTimeout = Math.min(
+    180_000,
+    Math.max(45_000, (payload.timeoutMillis ?? 120_000) + 30_000),
+  )
   const result = spawnSync(helper, [], {
     cwd: workspace,
     input: `${JSON.stringify(payload)}\n`,
     encoding: "utf8",
     windowsHide: true,
     stdio: ["pipe", "pipe", "pipe", "pipe"],
-    timeout: 30_000,
+    timeout: harnessTimeout,
   })
   if (result.error) throw result.error
   return {
@@ -173,14 +182,17 @@ try {
   }
 
   const powershellWrite = runSandbox(
-    request([
-      powershell,
-      "-NoLogo",
-      "-NoProfile",
-      "-NonInteractive",
-      "-Command",
-      "[IO.File]::WriteAllText((Join-Path (Get-Location) 'powershell-ok.txt'),'powershell-ok')",
-    ]),
+    request(
+      [
+        powershell,
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "[IO.File]::WriteAllText((Join-Path (Get-Location) 'powershell-ok.txt'),'powershell-ok')",
+      ],
+      { timeoutMillis: 60_000 },
+    ),
   )
   if (
     powershellWrite.status !== 0 ||

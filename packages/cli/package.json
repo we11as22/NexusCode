@@ -12,7 +12,7 @@
     "package.json"
   ],
   "scripts": {
-    "build": "corepack pnpm --filter @nexuscode/sandbox build && node ../sandbox/scripts/copy-native.mjs . && tsup && node scripts/copy-ripgrep.mjs",
+    "build": "node ../sandbox/scripts/copy-native.mjs . && tsup && node scripts/copy-ripgrep.mjs",
     "dev": "tsup --watch",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
