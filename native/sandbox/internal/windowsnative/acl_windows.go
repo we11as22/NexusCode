@@ -28,12 +28,13 @@ type authorityPlan struct {
 	GroupSID        string
 }
 
-const currentACLStateRevision = 1
+const currentACLStateRevision = 2
 
 type aclApplicationState struct {
 	Revision int               `json:"revision"`
 	GroupSID string            `json:"groupSid"`
 	Roots    map[string]string `json:"roots"`
+	Traverse map[string]string `json:"traverse"`
 	ReadOnly map[string]string `json:"readOnly"`
 	Denied   map[string]string `json:"denied"`
 }
@@ -305,6 +306,16 @@ func applyAuthorityACLs(
 	ephemeral := ephemeralRootSet(request)
 	readable := append([]string(nil), request.ReadableRoots...)
 	sort.Strings(readable)
+	if changed, err := applyAncestorTraverseACLs(
+		readable,
+		plan,
+		groupSID,
+		&state,
+	); err != nil {
+		return err
+	} else if changed {
+		stateChanged = true
+	}
 	for _, root := range readable {
 		target, err := filepath.EvalSymlinks(root)
 		if err != nil {
@@ -446,6 +457,71 @@ func applyAuthorityACLs(
 		}
 	}
 	return nil
+}
+
+// applyAncestorTraverseACLs lets the private sandbox identities resolve a
+// known readable root through profile directories that do not grant access to
+// unrelated local accounts. Only FILE_TRAVERSE/execute and read-attributes
+// semantics are granted: no directory listing, file read, or write authority.
+// Capability ACLs on the selected root remain authoritative for writes.
+func applyAncestorTraverseACLs(
+	roots []string,
+	plan windowsmodel.CapabilityPlan,
+	groupSID string,
+	state *aclApplicationState,
+) (bool, error) {
+	changed := false
+	seen := make(map[string]struct{})
+	for _, root := range roots {
+		target, err := filepath.EvalSymlinks(root)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return false, fmt.Errorf("resolve readable root ancestors %q: %w", root, err)
+		}
+		for parent := filepath.Dir(target); ; parent = filepath.Dir(parent) {
+			next := filepath.Dir(parent)
+			if next == parent {
+				break
+			}
+			key, err := windowsmodel.CanonicalWindowsPath(parent)
+			if err != nil {
+				return false, err
+			}
+			if _, duplicate := seen[key]; duplicate {
+				continue
+			}
+			seen[key] = struct{}{}
+			// Never downgrade a selected root that is also an ancestor of a
+			// narrower readable root (for example workspace/.sandbox-temp).
+			if _, selectedRoot := plan.Roots[key]; selectedRoot {
+				continue
+			}
+			fingerprint := groupSID + "|traverse-v1"
+			if state.Traverse[key] == fingerprint {
+				continue
+			}
+			if err := replaceNamedACLEntries(
+				parent,
+				[]string{groupSID},
+				[]namedACLEntry{{
+					SID:         groupSID,
+					Permissions: fileGenericExecute,
+					AccessMode:  grantAccess,
+				}},
+			); err != nil {
+				return false, fmt.Errorf(
+					"grant sandbox traverse authority on %q: %w",
+					parent,
+					err,
+				)
+			}
+			state.Traverse[key] = fingerprint
+			changed = true
+		}
+	}
+	return changed, nil
 }
 
 const (
@@ -597,6 +673,7 @@ func newACLApplicationState(groupSID string) aclApplicationState {
 		Revision: currentACLStateRevision,
 		GroupSID: groupSID,
 		Roots:    make(map[string]string),
+		Traverse: make(map[string]string),
 		ReadOnly: make(map[string]string),
 		Denied:   make(map[string]string),
 	}
@@ -615,9 +692,11 @@ func loadACLApplicationState(groupSID string) aclApplicationState {
 		state.Revision != currentACLStateRevision ||
 		!strings.EqualFold(state.GroupSID, groupSID) ||
 		state.Roots == nil ||
+		state.Traverse == nil ||
 		state.ReadOnly == nil ||
 		state.Denied == nil ||
 		len(state.Roots) > 8192 ||
+		len(state.Traverse) > 32768 ||
 		len(state.ReadOnly) > 8192 ||
 		len(state.Denied) > 8192 {
 		return newACLApplicationState(groupSID)
